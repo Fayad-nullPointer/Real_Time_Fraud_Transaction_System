@@ -1,0 +1,29 @@
+when features excluded:
+COLS_TO_DROP = ["TERMINAL_ID", 
+                "TRANSACTION_ID", 
+                "std_amount", 
+                "TX_TIME_SECONDS",
+                "TX_FRAUD_SCENARIO"]
+
+
+==================== Logistic Regression at (Threshold = 0.5) ====================
+              precision    recall  f1-score   support
+
+       Legit       0.99      0.72      0.83    347681
+       Fraud       0.02      0.52      0.03      3150
+
+    accuracy                           0.71    350831
+   macro avg       0.51      0.62      0.43    350831
+weighted avg       0.99      0.71      0.83    350831
+
+ROC-AUC:  0.6628
+PR-AUC:   0.3271
+
+
+
+______________________________________________
+
+Validation Strategy to use later:
+- Stratified cross-validation to maintain class distribution
+- Out-of-time validation for temporal stability
+- Multiple evaluation periods for robustness
