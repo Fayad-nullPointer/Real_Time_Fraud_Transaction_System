@@ -172,3 +172,68 @@ def find_best_threshold(
     print(f"F1:        {best['f1']:.3f}")
 
     return best["threshold"], results_df
+
+
+def evaluate_model(
+    y_true,
+    y_pred,
+    y_prob=None,
+    model_name="Model"
+):
+    """
+    Prints evaluation metrics without any visualizations.
+
+    Returns a dictionary containing all useful metrics.
+    """
+
+    print(f"\n{'=' * 20} {model_name} {'=' * 20}")
+
+    report = classification_report(
+        y_true,
+        y_pred,
+        target_names=["Legit", "Fraud"],
+        output_dict=True,
+        zero_division=0,
+    )
+
+    # Pretty report
+    print(classification_report(
+        y_true,
+        y_pred,
+        target_names=["Legit", "Fraud"],
+        zero_division=0,
+    ))
+
+    cm = confusion_matrix(y_true, y_pred)
+
+    roc_auc = None
+    pr_auc = None
+
+    if y_prob is not None:
+        roc_auc = roc_auc_score(y_true, y_prob)
+        pr_auc = average_precision_score(y_true, y_prob)
+
+        print(f"ROC-AUC : {roc_auc:.4f}")
+        print(f"PR-AUC  : {pr_auc:.4f}")
+
+    fraud = report["Fraud"]
+    macro = report["macro avg"]
+
+    print("\nImportant Metrics")
+    print("-----------------")
+    print(f"Fraud Precision : {fraud['precision']:.4f}")
+    print(f"Fraud Recall    : {fraud['recall']:.4f}")
+    print(f"Fraud F1-score  : {fraud['f1-score']:.4f}")
+    print(f"Macro F1-score  : {macro['f1-score']:.4f}")
+
+    return {
+        "fraud_precision": fraud["precision"],
+        "fraud_recall": fraud["recall"],
+        "fraud_f1": fraud["f1-score"],
+        "macro_f1": macro["f1-score"],
+        "accuracy": report["accuracy"],
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "classification_report": report,
+        "confusion_matrix": cm,
+    }
