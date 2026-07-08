@@ -13,12 +13,13 @@ test, replace, or reuse any single piece independently.
 
 | File | Responsibility |
 |---|---|
-| `input_handler.py` | Accepts new transaction data as a **dict, list of dicts, CSV file, or Excel file**, and validates it against the required raw schema. Knows nothing about feature engineering or models. |
-| `feature_engineering.py` | `FraudFeatureEngineer` — computes all 25 engineered features, exactly as done in training. Has a **batch** mode (`fit` + `build_training_frames`, used once to train) and a **stateful online** mode (`transform` + `register_realtime_state`, used per incoming transaction). Doesn't know where the input came from or what happens to its output. |
-| `models.py` | `FraudModelBundle` — the class responsible for **loading the two trained models and the saved fraud-decision threshold**, and turning a row of engineered features into a fraud probability + (if flagged) a fraud-scenario prediction. Doesn't know how the input was read or engineered. |
+| `input_handler.py` | Accepts new transaction data as a **dict, list of dicts, CSV file, or Excel file**, and validates it against the required raw schema. Knows nothing about feature engineering, modeling, or explainability. |
+| `feature_engineering.py` | `FraudFeatureEngineer` — computes all 25 engineered features, exactly as done in training. Has a **batch** mode (`fit` + `build_training_frames`, used once to train) and a **stateful online** mode (`transform` + `register_realtime_state`, used per incoming transaction). |
+| `models.py` | `FraudModelBundle` — the class responsible for **loading the two trained models and the saved fraud-decision threshold**, and turning a row of engineered features into a fraud probability + (if flagged) a fraud-scenario prediction. |
+| `explainability.py` | **Interpretability toolkit** — `TreeShapExplainer` (per-transaction SHAP/TreeSHAP), `FeatureImportanceReporter` (global gain/split importance), `PartialDependenceAnalyzer` (PDP + ICE curves), and the `FraudModelExplainer` facade that bundles all three for both models. |
 | `train_and_save_models.py` | Run once (or on a retraining cadence) against your raw CSVs to fit the feature engineer and train + save both models. |
-| `batch_predictor.py` | **Orchestrator for offline/batch scoring.** Wires `input_handler.py` → `feature_engineering.py` → `models.py` together for a dict, list, CSV, or Excel file of new transactions, and can export the scored results to CSV/Excel. |
-| `fraud_pipeline.py` | **Orchestrator for real-time, one-at-a-time scoring** (e.g. behind a FastAPI endpoint or a Kafka consumer). Same building blocks as `batch_predictor.py`, just optimized for scoring a single transaction as it arrives. |
+| `batch_predictor.py` | **Orchestrator for offline/batch scoring.** Wires `input_handler.py` → `feature_engineering.py` → `models.py` → `explainability.py` together for a dict, list, CSV, or Excel file of new transactions, attaches SHAP explanation columns, and can export the scored results to CSV/Excel. |
+| `fraud_pipeline.py` | **Orchestrator for real-time, one-at-a-time scoring** (e.g. behind a FastAPI endpoint or a Kafka consumer). Same building blocks as `batch_predictor.py`, optimized for scoring a single transaction as it arrives, with an optional SHAP explanation. |
 
 ## The two models, as requested
 
@@ -32,6 +33,24 @@ test, replace, or reuse any single piece independently.
    25 engineered features. Only fires when the fraud detector flags a
    transaction. Both models and the threshold are loaded and served by the
    single `FraudModelBundle` class in `models.py`.
+
+## Interpretability / explainability
+
+`explainability.py` provides three focused tools, bundled by one facade
+(`FraudModelExplainer`) so the rest of the pipeline only has to hold a
+single object:
+
+| Tool | What it answers | Scope |
+|---|---|---|
+| `TreeShapExplainer` (TreeSHAP) | "Why did *this* transaction get this score?" — each feature's exact contribution to the prediction. | Per-transaction (local) |
+| `FeatureImportanceReporter` | "Which features matter most overall?" — LightGBM gain/split importance. | Whole model (global) |
+| `PartialDependenceAnalyzer` | "How does the prediction change as *one* feature varies, holding others fixed?" — PDP (average effect) + ICE (per-instance curves). | Whole model (global), evaluated on a reference sample |
+
+By default, `FraudBatchPredictor.from_artifacts(...)` and
+`FraudDetectionPipeline.from_artifacts(...)` both build a `FraudModelExplainer`
+automatically (requires `pip install shap`). If `shap` isn't installed, the
+rest of the pipeline still works — explanations are simply unavailable until
+it's installed.
 
 ---
 
@@ -123,7 +142,22 @@ results = predictor.predict_and_save("new_transactions.xlsx", "scored_transactio
 ```
 
 Each returned row keeps your original input columns and adds:
-`fraud_probability`, `is_fraud`, `scenario_id`, `scenario_name`, `scenario_confidence`.
+
+```
+TRANSACTION_ID  CUSTOMER_ID  TERMINAL_ID  TX_DATETIME  TX_AMOUNT
+fraud_probability  is_fraud  scenario_id  scenario_name  scenario_confidence
+shap_fraud_TX_AMOUNT  shap_fraud_hour  shap_fraud_distance  ...  (one shap_fraud_<feature> column per engineered feature)
+```
+
+The `shap_fraud_*` columns are plain floats — positive pushes the score
+toward fraud, negative pushes it away — ready to drop into a plot (bar
+chart, waterfall chart), a BI dashboard, or a written report without any
+extra transformation. Set `include_explanations=False` to skip them (e.g.
+for faster scoring on very large batches):
+
+```python
+results = predictor.predict(txs, include_explanations=False)
+```
 
 You can also run it from the command line:
 
@@ -131,11 +165,36 @@ You can also run it from the command line:
 python batch_predictor.py --artifacts-dir models --input new_transactions.csv --output scored.csv
 python batch_predictor.py --artifacts-dir models --input new_transactions.xlsx --output scored.xlsx
 python batch_predictor.py --artifacts-dir models --input transactions.json   # a JSON file containing a list of dicts
+python batch_predictor.py --artifacts-dir models --input new_transactions.csv --no-explanations   # skip SHAP columns
 ```
 
 If you pass multiple transactions for the same customer, feed them in
 chronological order (`batch_predictor.py` sorts by `CUSTOMER_ID`/`TX_DATETIME`
 internally, but keep this in mind if you're chaining multiple separate calls).
+
+### Global reporting: feature importance and PDP/ICE
+
+These are independent of any single prediction — they describe the model as
+a whole, so call them whenever you want a report, not once per transaction.
+
+```python
+# global feature importance (gain-based, or "split")
+importance_df = predictor.get_feature_importance(model="fraud", importance_type="gain")
+
+# PDP + ICE for one feature, using the most recent predict() call as reference data
+pdp_ice = predictor.compute_partial_dependence("TX_AMOUNT", grid_resolution=50)
+pdp_ice["grid_values"]   # the TX_AMOUNT values swept across
+pdp_ice["pdp"]           # 1D array: average predicted fraud probability at each grid value
+pdp_ice["ice"]           # 2D array: one curve per reference transaction
+
+# or supply your own reference sample (e.g. a larger historical batch)
+pdp_ice = predictor.compute_partial_dependence(
+    "TX_AMOUNT", reference_data=my_reference_features_df
+)
+
+# scenario model's importance, if you trained one
+scenario_importance = predictor.get_feature_importance(model="scenario")
+```
 
 ## 4. Score new transactions — one at a time, real time
 
