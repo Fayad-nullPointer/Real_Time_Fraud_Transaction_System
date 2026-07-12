@@ -83,54 +83,110 @@ class FraudModelBundle:
         self.fraud_threshold = fraud_threshold
 
     # ------------------------------------------------------------------ #
+    def _require_columns(self, X: pd.DataFrame) -> None:
+        """Fail fast with a precise message if the engineered features don't
+        have what the models expect — much easier to debug in production
+        than a cryptic sklearn/LightGBM shape error three layers down."""
+        missing = [c for c in FEATURE_COLS if c not in X.columns]
+        if missing:
+            raise ValueError(
+                f"Engineered features are missing required column(s): {missing}. "
+                f"This usually means FraudFeatureEngineer / FEATURE_COLS is out of "
+                f"sync with the trained model artifacts."
+            )
+
+    def _scenario_prediction(self, X: pd.DataFrame, is_fraud: np.ndarray):
+        """Run the scenario model (when one is loaded) ONLY on rows flagged
+        as fraud by the fraud detector, and return the single best-guess
+        (scenario_id, scenario_name, scenario_confidence) per row — `None`
+        for every row where `is_fraud` is False.
+
+        IMPORTANT — how to read this: the scenario model was trained only on
+        confirmed-fraud rows, so it's only meaningful to ask "which attack
+        pattern does this look like" once a transaction has already been
+        flagged as fraud by the fraud detector (the authoritative signal for
+        whether to act on a transaction). Non-fraud rows get `None`s instead
+        of a scenario guess, since "which fraud scenario would this be if it
+        weren't fraud" isn't a well-posed question.
+        """
+        n = len(X)
+        scenario_id = [None] * n
+        scenario_name = [None] * n
+        scenario_conf = [None] * n
+
+        if self.scenario_model is None:
+            return scenario_id, scenario_name, scenario_conf
+
+        is_fraud = np.asarray(is_fraud)
+        fraud_positions = np.where(is_fraud)[0]
+        if len(fraud_positions) == 0:
+            return scenario_id, scenario_name, scenario_conf
+
+        X_fraud = X.iloc[fraud_positions]
+        proba = self.scenario_model.predict_proba(X_fraud)
+        classes = self.scenario_model.classes_
+        best_idx = proba.argmax(axis=1)
+        ids = classes[best_idx]
+        confs = proba[np.arange(len(X_fraud)), best_idx]
+        names = [SCENARIO_NAMES.get(int(s)) for s in ids]
+
+        for pos, sid, sname, sconf in zip(fraud_positions, ids, names, confs):
+            scenario_id[pos] = sid
+            scenario_name[pos] = sname
+            scenario_conf[pos] = sconf
+
+        return scenario_id, scenario_name, scenario_conf
+
     def predict_one(self, features: pd.DataFrame, transaction_id=None) -> FraudPrediction:
         """`features` is the single-row DataFrame returned by
-        `FraudFeatureEngineer.transform`."""
+        `FraudFeatureEngineer.transform`.
+
+        Returns fraud_probability/is_fraud from the fraud detector, AND
+        scenario_id/scenario_name/scenario_confidence from the scenario
+        model ONLY if `is_fraud` is True — see `_scenario_prediction` for
+        why non-fraud rows get `None` scenario fields instead.
+        """
         X = features[FEATURE_COLS]
+        self._require_columns(X)
+
         fraud_prob = float(self.fraud_model.predict_proba(X)[:, 1][0])
         is_fraud = fraud_prob >= self.fraud_threshold
 
-        scenario_id, scenario_conf = None, None
-        if is_fraud and self.scenario_model is not None:
-            proba = self.scenario_model.predict_proba(X)[0]
-            classes = self.scenario_model.classes_
-            best_idx = int(np.argmax(proba))
-            scenario_id = int(classes[best_idx])
-            scenario_conf = float(proba[best_idx])
+        scenario_ids, scenario_names, scenario_confs = self._scenario_prediction(
+            X, is_fraud=np.array([is_fraud])
+        )
+        scenario_id, scenario_name, scenario_conf = scenario_ids[0], scenario_names[0], scenario_confs[0]
 
         return FraudPrediction(
             transaction_id=transaction_id,
             fraud_probability=fraud_prob,
             is_fraud=is_fraud,
-            scenario_id=scenario_id,
-            scenario_name=SCENARIO_NAMES.get(scenario_id) if scenario_id is not None else None,
-            scenario_confidence=scenario_conf,
+            scenario_id=int(scenario_id) if scenario_id is not None else None,
+            scenario_name=scenario_name,
+            scenario_confidence=float(scenario_conf) if scenario_conf is not None else None,
         )
 
     def predict_batch(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """Vectorized scoring for a DataFrame of many already-engineered rows
-        (each row = FEATURE_COLS). Useful for batch/offline scoring."""
+        (each row = FEATURE_COLS). Useful for batch/offline scoring.
+
+        Like `predict_one`, scenario_id/scenario_name/scenario_confidence are
+        populated ONLY for rows where is_fraud is True — see
+        `_scenario_prediction` for why non-fraud rows get `None` instead.
+        """
         X = features_df[FEATURE_COLS]
+        self._require_columns(X)
+
         fraud_prob = self.fraud_model.predict_proba(X)[:, 1]
         is_fraud = fraud_prob >= self.fraud_threshold
 
-        scenario_id = np.full(len(X), np.nan)
-        scenario_conf = np.full(len(X), np.nan)
-        if is_fraud.any() and self.scenario_model is not None:
-            flagged_idx = np.where(is_fraud)[0]
-            proba = self.scenario_model.predict_proba(X.iloc[flagged_idx])
-            classes = self.scenario_model.classes_
-            best_idx = proba.argmax(axis=1)
-            scenario_id[flagged_idx] = classes[best_idx]
-            scenario_conf[flagged_idx] = proba[np.arange(len(best_idx)), best_idx]
+        scenario_id, scenario_name, scenario_conf = self._scenario_prediction(X, is_fraud=is_fraud)
 
         out = features_df.copy()
         out["fraud_probability"] = fraud_prob
         out["is_fraud"] = is_fraud
         out["scenario_id"] = scenario_id
-        out["scenario_name"] = [
-            SCENARIO_NAMES.get(int(s)) if not np.isnan(s) else None for s in scenario_id
-        ]
+        out["scenario_name"] = scenario_name
         out["scenario_confidence"] = scenario_conf
         return out
 

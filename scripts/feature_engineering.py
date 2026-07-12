@@ -28,6 +28,7 @@ Two usage modes
 
 from __future__ import annotations
 
+import logging
 import pickle
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ from typing import Deque, Dict, Optional
 import numpy as np
 import pandas as pd
 from scipy.spatial import KDTree
+
+logger = logging.getLogger("feature_engineering")
 
 NIGHT_HOURS = {0, 1, 2, 3, 4}
 SMALL_TX = 10.0
@@ -477,6 +480,163 @@ class FraudFeatureEngineer:
         cutoff = ts - pd.Timedelta(hours=4)
         while state.recent_tx_times and state.recent_tx_times[0] < cutoff:
             state.recent_tx_times.popleft()
+
+    # ------------------------------------------------------------------ #
+    # Warm start — seed a known customer's realtime state from real history
+    # ------------------------------------------------------------------ #
+    def warm_start_customer(self, customer_id, history_df: Optional[pd.DataFrame]) -> bool:
+        """
+        Seed this customer's realtime lag/velocity state from their ACTUAL
+        transaction history (e.g. pulled from a transactions table/DB),
+        instead of letting the first `transform()` call cold-start them with
+        profile means and zero velocity.
+
+        This matters because in a real system a "new to this process"
+        customer is very often NOT a new customer — a service restart, a
+        new pod spinning up, or a request routed to a different replica all
+        reset in-memory state, but the customer's real history still exists
+        upstream. Without warm start, that customer's lag/velocity features
+        (and therefore fraud score) would be silently wrong for their first
+        transaction after every such event. Warm start closes that gap.
+
+        Parameters
+        ----------
+        customer_id : the CUSTOMER_ID to warm up. Must be a known customer
+            (present in the fitted customer profiles) — unknown customers
+            raise `KeyError`, exactly like `transform()` does, so a bad
+            customer_id fails loudly and immediately rather than silently
+            no-oping.
+        history_df : that customer's past transactions, with at least
+            TX_DATETIME and TX_AMOUNT columns, in ANY order (this method
+            sorts them chronologically itself). Pass as much or as little
+            history as you have available — only the most recent rows
+            actually matter (last 3 for lag features, last 2000 timestamps
+            for the velocity windows), so over-supplying history is always
+            safe and never expensive.
+
+        Returns
+        -------
+        True  — state was seeded from at least one valid historical row.
+        False — `history_df` was empty/None/had no valid rows for this
+                 customer, so their state was left untouched. This is a
+                 deliberate no-op, not a fault: the next real transaction
+                 will simply cold-start as before.
+
+        Idempotent: each call fully REPLACES this customer's buffered state
+        rather than appending to it, so re-warm-starting the same customer
+        (e.g. after a retry) never double-counts history.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Feature engineer is not fitted / loaded.")
+        if customer_id not in self.customer_profiles_.index:
+            raise KeyError(f"Unknown CUSTOMER_ID {customer_id}: no profile on file.")
+
+        if history_df is None or history_df.empty:
+            logger.info(
+                "warm_start_customer(%s): no history rows supplied — leaving "
+                "cold start in place.", customer_id,
+            )
+            return False
+
+        required = {"TX_DATETIME", "TX_AMOUNT"}
+        missing = required - set(history_df.columns)
+        if missing:
+            raise ValueError(f"history_df is missing required column(s): {sorted(missing)}")
+
+        h = history_df.copy()
+        h["TX_DATETIME"] = pd.to_datetime(h["TX_DATETIME"], errors="coerce")
+        h["TX_AMOUNT"] = pd.to_numeric(h["TX_AMOUNT"], errors="coerce")
+        h = h.dropna(subset=["TX_DATETIME", "TX_AMOUNT"]).sort_values("TX_DATETIME")
+        if h.empty:
+            logger.info(
+                "warm_start_customer(%s): history had no valid rows after "
+                "cleaning — leaving cold start in place.", customer_id,
+            )
+            return False
+
+        fresh_state = _CustomerState()
+        for amt in h["TX_AMOUNT"].tail(fresh_state.last_amounts.maxlen):
+            fresh_state.last_amounts.append(float(amt))
+        for ts in h["TX_DATETIME"].tail(fresh_state.recent_tx_times.maxlen):
+            fresh_state.recent_tx_times.append(pd.Timestamp(ts))
+
+        # replace (not merge) so repeated warm starts stay idempotent
+        self._customer_state[customer_id] = fresh_state
+        logger.info(
+            "warm_start_customer(%s): seeded from %d historical row(s) "
+            "(last_amounts=%d, recent_tx_times=%d).",
+            customer_id, len(h), len(fresh_state.last_amounts), len(fresh_state.recent_tx_times),
+        )
+        return True
+
+    def warm_start_from_history(
+        self, history_df: pd.DataFrame, *, customer_id_col: str = "CUSTOMER_ID"
+    ) -> Dict[str, list]:
+        """
+        Bulk version of `warm_start_customer` — call once at process startup
+        with a recent slice of the transactions table (e.g. "everything from
+        the last few hours/days, all customers") so every returning
+        customer's realtime state is already warm before the first live
+        transaction is scored. This is the production-realistic pattern:
+        real systems restore in-memory state from durable history on
+        startup rather than trusting a cold cache.
+
+        Robust by design: a bulk warm start must never fail because of a
+        handful of bad or unknown rows — those are skipped and reported,
+        never raised.
+
+        Parameters
+        ----------
+        history_df : transactions for potentially many customers, with at
+            least CUSTOMER_ID (or `customer_id_col`), TX_DATETIME, TX_AMOUNT.
+        customer_id_col : column name to group by (default "CUSTOMER_ID").
+
+        Returns
+        -------
+        {"warmed": [...], "skipped_unknown": [...], "skipped_empty": [...],
+         "skipped_error": [...]}
+        - warmed          : customers successfully seeded.
+        - skipped_unknown : customer_ids not in the fitted profiles.
+        - skipped_empty   : known customers with no usable history rows.
+        - skipped_error   : known customers whose rows raised an unexpected
+                             error while warming (logged, not raised).
+        """
+        report = {"warmed": [], "skipped_unknown": [], "skipped_empty": [], "skipped_error": []}
+        if history_df is None or history_df.empty:
+            logger.warning("warm_start_from_history: received an empty history_df — nothing to warm.")
+            return report
+        if customer_id_col not in history_df.columns:
+            raise ValueError(f"history_df is missing the customer id column '{customer_id_col}'.")
+
+        for cust_id, group in history_df.groupby(customer_id_col):
+            if cust_id not in self.customer_profiles_.index:
+                report["skipped_unknown"].append(cust_id)
+                continue
+            try:
+                warmed = self.warm_start_customer(cust_id, group)
+                report["warmed" if warmed else "skipped_empty"].append(cust_id)
+            except Exception:
+                logger.exception(
+                    "warm_start_from_history: failed to warm CUSTOMER_ID=%s — "
+                    "skipping this customer, continuing the rest of the batch.",
+                    cust_id,
+                )
+                report["skipped_error"].append(cust_id)
+
+        logger.info(
+            "warm_start_from_history: warmed=%d skipped_unknown=%d skipped_empty=%d skipped_error=%d",
+            len(report["warmed"]), len(report["skipped_unknown"]),
+            len(report["skipped_empty"]), len(report["skipped_error"]),
+        )
+        return report
+
+    def is_warm(self, customer_id) -> bool:
+        """True if this customer already has buffered realtime state, either
+        from real scoring earlier in this process or from a warm start.
+        Handy for debugging/monitoring ("is this customer's score based on
+        real history, or did they just cold-start?")."""
+        state = self._customer_state.get(customer_id)
+        return bool(state and len(state.last_amounts) > 0)
 
     # ------------------------------------------------------------------ #
     # Persistence

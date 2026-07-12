@@ -115,8 +115,72 @@ class TreeShapExplainer:
 
     def explain_batch(self, features_df: pd.DataFrame, target_class: int = 1,
                        prefix: str = "shap_") -> pd.DataFrame:
-        """SHAP contribution columns (`<prefix><feature>`), one row per input row."""
+        """SHAP contribution columns (`<prefix><feature>`), one row per input row,
+        all explained against the SAME target_class (e.g. always class 1 =
+        fraud, for the fraud model)."""
         values = self.shap_values(features_df, target_class=target_class)
+        cols = {f"{prefix}{name}": values[:, i] for i, name in enumerate(self._transformed_names)}
+        return pd.DataFrame(cols, index=features_df.index)
+
+    def shap_values_per_row(self, X: pd.DataFrame, target_classes: Sequence[Optional[int]]) -> np.ndarray:
+        """Like `shap_values`, but each row is explained against its OWN
+        target class instead of one shared class for the whole batch.
+
+        This is what a multiclass model (e.g. the scenario detector) needs:
+        row 5 might be best explained "why does this look like scenario 2"
+        while row 6 needs "why does this look like scenario 3". Rows whose
+        `target_classes` entry is None get all-zero SHAP rows (nothing to
+        explain — e.g. no scenario model / no prediction for that row).
+        """
+        n_rows = len(X)
+        n_feat = len(self._transformed_names)
+        out = np.zeros((n_rows, n_feat), dtype=float)
+        if n_rows == 0:
+            return out
+
+        X_t = self._transform(X)
+        raw = self._explainer.shap_values(X_t)
+
+        # Normalize `raw` into a function row_idx, class -> 1D array of length n_feat
+        if isinstance(raw, list):  # older shap API: one (n_rows, n_feat) array per class
+            classes = list(getattr(self._estimator, "classes_", range(len(raw))))
+            def _row(i, cls):
+                idx = classes.index(cls) if cls in classes else int(cls)
+                return raw[idx][i]
+        elif raw.ndim == 3:  # newer shap API: (n_rows, n_feat, n_classes)
+            classes = list(getattr(self._estimator, "classes_", range(raw.shape[2])))
+            def _row(i, cls):
+                idx = classes.index(cls) if cls in classes else int(cls)
+                return raw[i, :, idx]
+        else:  # binary classification: single (n_rows, n_feat) array
+            def _row(i, cls):
+                return raw[i]
+
+        for i, cls in enumerate(target_classes):
+            if cls is None:
+                continue
+            try:
+                out[i] = _row(i, cls)
+            except Exception:
+                logger.warning(
+                    "Could not compute per-row SHAP for row %d, target class %r — "
+                    "leaving zeros for that row instead of failing the whole batch.",
+                    i, cls,
+                )
+        return out
+
+    def explain_batch_per_row(self, features_df: pd.DataFrame, target_classes: Sequence[Optional[int]],
+                               prefix: str = "shap_") -> pd.DataFrame:
+        """SHAP contribution columns (`<prefix><feature>`), one row per input
+        row, each explained against its own `target_classes[i]` (see
+        `shap_values_per_row`). Use this for the scenario model, where the
+        "interesting" class differs per transaction."""
+        if len(target_classes) != len(features_df):
+            raise ValueError(
+                f"target_classes has {len(target_classes)} entries but "
+                f"features_df has {len(features_df)} rows — they must line up 1:1."
+            )
+        values = self.shap_values_per_row(features_df, target_classes)
         cols = {f"{prefix}{name}": values[:, i] for i, name in enumerate(self._transformed_names)}
         return pd.DataFrame(cols, index=features_df.index)
 
@@ -224,19 +288,66 @@ class FraudModelExplainer:
     # ---- local (per-transaction) ------------------------------------
     def explain_batch(self, features_df: pd.DataFrame, prefix: str = "shap_fraud_") -> pd.DataFrame:
         """Fraud-model SHAP contribution columns for many rows at once —
-        used to enrich a batch of scored transactions."""
+        used to enrich a batch of scored transactions. Always explained
+        against class 1 (fraud), since that's the one probability everyone
+        cares about regardless of the transaction's outcome."""
         return self.fraud_shap.explain_batch(features_df, target_class=1, prefix=prefix)
+
+    def explain_scenario_batch(self, features_df: pd.DataFrame, scenario_ids: Sequence[Optional[int]],
+                                prefix: str = "shap_scenario_") -> pd.DataFrame:
+        """Scenario-model SHAP contribution columns for many rows at once,
+        each row explained against ITS OWN predicted scenario_id (from
+        `FraudModelBundle.predict_batch`/`predict_one`) — populated for
+        EVERY row that has a scenario_id, not only rows flagged as fraud.
+
+        If no scenario model was trained/loaded, returns a same-shaped
+        DataFrame of zeros rather than raising, so callers can always merge
+        it in unconditionally."""
+        if self.scenario_shap is None:
+            logger.warning(
+                "No scenario model loaded — returning zero-filled shap_scenario_* "
+                "columns instead of failing the batch."
+            )
+            cols = {f"{prefix}{name}": 0.0 for name in self.feature_names}
+            return pd.DataFrame(cols, index=features_df.index)
+        return self.scenario_shap.explain_batch_per_row(features_df, scenario_ids, prefix=prefix)
 
     def explain_transaction(self, features: pd.DataFrame, is_fraud: bool = False,
                              scenario_id: Optional[int] = None) -> Dict[str, float]:
-        """Fraud-model SHAP contributions for one transaction, plus
-        scenario-model SHAP contributions too if it was flagged as fraud
-        and a scenario was predicted."""
+        """Fraud-model SHAP contributions for one transaction (always), PLUS
+        scenario-model SHAP contributions for whichever scenario was
+        predicted — populated even when `is_fraud` is False, so you can see
+        *why* the scenario model leans toward a given attack pattern even on
+        a transaction that wasn't flagged as fraud overall.
+
+        `is_fraud` is accepted for backwards compatibility / logging context
+        but no longer gates whether scenario SHAP is computed — only
+        `scenario_id is not None` and a loaded scenario model do.
+        """
         out = {f"shap_fraud_{k}": v for k, v in self.fraud_shap.explain_instance(features, target_class=1).items()}
-        if is_fraud and scenario_id is not None and self.scenario_shap is not None:
-            scenario_vals = self.scenario_shap.explain_instance(features, target_class=scenario_id)
-            out.update({f"shap_scenario_{k}": v for k, v in scenario_vals.items()})
+        if scenario_id is not None and self.scenario_shap is not None:
+            try:
+                scenario_vals = self.scenario_shap.explain_instance(features, target_class=scenario_id)
+                out.update({f"shap_scenario_{k}": v for k, v in scenario_vals.items()})
+            except Exception:
+                logger.exception(
+                    "Scenario SHAP explanation failed for scenario_id=%s — "
+                    "returning fraud SHAP only for this transaction instead of "
+                    "failing the whole request.", scenario_id,
+                )
         return out
+
+    def explain_batch_full(self, features_df: pd.DataFrame, scenario_ids: Sequence[Optional[int]],
+                            fraud_prefix: str = "shap_fraud_",
+                            scenario_prefix: str = "shap_scenario_") -> pd.DataFrame:
+        """Convenience: fraud SHAP + scenario SHAP columns for a whole batch
+        in one call, side by side, ready to merge onto a results table.
+        `scenario_ids` must line up 1:1 with `features_df` rows (this is
+        exactly what `FraudModelBundle.predict_batch(...)["scenario_id"]`
+        gives you)."""
+        fraud_df = self.explain_batch(features_df, prefix=fraud_prefix)
+        scenario_df = self.explain_scenario_batch(features_df, scenario_ids, prefix=scenario_prefix)
+        return pd.concat([fraud_df, scenario_df], axis=1)
 
     # ---- global -------------------------------------------------------
     def global_feature_importance(self, model: str = "fraud", importance_type: str = "gain") -> pd.DataFrame:

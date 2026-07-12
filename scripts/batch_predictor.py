@@ -117,7 +117,8 @@ class FraudBatchPredictor:
 
     # ------------------------------------------------------------------ #
     def predict(
-        self, source: InputSource, *, update_state: bool = True, include_explanations: bool = True
+        self, source: InputSource, *, update_state: bool = True, include_explanations: bool = True,
+        raise_on_error: bool = False,
     ) -> pd.DataFrame:
         """
         Score every transaction in `source`.
@@ -133,17 +134,32 @@ class FraudBatchPredictor:
             batch. Set False to score a batch without mutating pipeline state
             (e.g. re-scoring the same data for analysis).
         include_explanations : if True (default), attaches one
-            `shap_fraud_<feature>` column per engineered feature — that
-            feature's contribution to this transaction's fraud probability.
-            Requires the explainer to have loaded successfully (needs the
-            `shap` package installed).
+            `shap_fraud_<feature>` column per engineered feature (that
+            feature's contribution to the fraud probability) for every row,
+            AND one `shap_scenario_<feature>` column per feature (that
+            feature's contribution to the predicted scenario) for rows
+            flagged as fraud — mirroring `scenario_id` / `scenario_name` /
+            `scenario_confidence`, which are only populated when `is_fraud`
+            is True. Rows that weren't flagged as fraud get zero-filled
+            `shap_scenario_*` columns, since there's no predicted scenario to
+            explain. Requires the explainer to have loaded successfully
+            (needs the `shap` package installed).
+        raise_on_error : if False (default, production-safe), a transaction
+            that fails to score (e.g. an unknown CUSTOMER_ID/TERMINAL_ID, or
+            any other unexpected error) is logged and recorded in the
+            `scoring_error` column instead of raising — the rest of the
+            batch still gets scored normally. Set True to fail fast instead
+            (e.g. in tests, or a CLI run where you want to catch data issues
+            immediately).
 
         Returns
         -------
         A DataFrame with one row per input transaction:
         TRANSACTION_ID, CUSTOMER_ID, TERMINAL_ID, TX_DATETIME, TX_AMOUNT,
         fraud_probability, is_fraud, scenario_id, scenario_name,
-        scenario_confidence, and (if requested) the SHAP explanation columns.
+        scenario_confidence, scoring_error (None unless that row failed),
+        and (if requested) the SHAP explanation columns for every row that
+        scored successfully.
         """
         raw_df = TransactionInputLoader.load(source)
         validated_df = TransactionInputLoader.validate(raw_df)
@@ -151,36 +167,68 @@ class FraudBatchPredictor:
 
         prediction_rows = []
         feature_rows = []
+        scored_tx_ids = []
+        errors = {}
+
         for tx in records:
-            features = self.feature_engineer.transform(tx)
-            prediction = self.model_bundle.predict_one(
-                features, transaction_id=tx["TRANSACTION_ID"]
-            )
-            if update_state:
-                self.feature_engineer.register_realtime_state(tx)
-            prediction_rows.append(prediction.to_dict())
-            feature_rows.append(features)
+            tx_id = tx.get("TRANSACTION_ID")
+            try:
+                features = self.feature_engineer.transform(tx)
+                prediction = self.model_bundle.predict_one(features, transaction_id=tx_id)
+                if update_state:
+                    self.feature_engineer.register_realtime_state(tx)
+                prediction_rows.append(prediction.to_dict())
+                feature_rows.append(features)
+                scored_tx_ids.append(tx_id)
+            except Exception as exc:
+                if raise_on_error:
+                    raise
+                logger.error(
+                    "Failed to score TRANSACTION_ID=%s: %s — skipping this row, "
+                    "continuing with the rest of the batch.", tx_id, exc,
+                )
+                errors[tx_id] = str(exc)
+                prediction_rows.append({
+                    "TRANSACTION_ID": tx_id,
+                    "fraud_probability": None, "is_fraud": None,
+                    "scenario_id": None, "scenario_name": None, "scenario_confidence": None,
+                })
 
         predictions_df = pd.DataFrame(prediction_rows, columns=OUTPUT_COLUMNS)
         merged = validated_df.merge(predictions_df, on="TRANSACTION_ID", how="left")
+        merged["scoring_error"] = merged["TRANSACTION_ID"].map(errors) if errors else None
 
-        all_features = pd.concat(feature_rows, ignore_index=True)
-        self._last_scored_features = all_features
+        self._last_scored_features = pd.concat(feature_rows, ignore_index=True) if feature_rows else None
 
         if include_explanations:
-            if self.explainer is None:
-                raise RuntimeError(
-                    "Explanations were requested but no explainer is loaded. "
-                    "Install the 'shap' package and reload with "
-                    "FraudBatchPredictor.from_artifacts(..., load_explainer=True), "
-                    "or call predict(..., include_explanations=False)."
+            if not feature_rows:
+                logger.warning(
+                    "include_explanations=True but every row in this batch failed to "
+                    "score — nothing to explain, skipping SHAP columns."
                 )
-            shap_df = self.explainer.explain_batch(all_features)
-            shap_df["TRANSACTION_ID"] = validated_df["TRANSACTION_ID"].values
-            merged = merged.merge(shap_df, on="TRANSACTION_ID", how="left")
+            else:
+                if self.explainer is None:
+                    raise RuntimeError(
+                        "Explanations were requested but no explainer is loaded. "
+                        "Install the 'shap' package and reload with "
+                        "FraudBatchPredictor.from_artifacts(..., load_explainer=True), "
+                        "or call predict(..., include_explanations=False)."
+                    )
+                scenario_by_tx_id = {r["TRANSACTION_ID"]: r["scenario_id"] for r in prediction_rows}
+                scenario_ids_for_shap = [scenario_by_tx_id[tid] for tid in scored_tx_ids]
+                shap_df = self.explainer.explain_batch_full(
+                    self._last_scored_features, scenario_ids=scenario_ids_for_shap
+                )
+                shap_df["TRANSACTION_ID"] = scored_tx_ids
+                merged = merged.merge(shap_df, on="TRANSACTION_ID", how="left")
 
-        n_flagged = int(merged["is_fraud"].sum())
-        logger.info("Scored %d transaction(s) — %d flagged as fraud.", len(merged), n_flagged)
+        n_scored = len(scored_tx_ids)
+        n_failed = len(errors)
+        n_flagged = int(merged["is_fraud"].fillna(False).astype(bool).sum())
+        logger.info(
+            "Scored %d/%d transaction(s) — %d flagged as fraud, %d failed to score.",
+            n_scored, len(merged), n_flagged, n_failed,
+        )
         return merged
 
     def predict_and_save(
@@ -232,6 +280,22 @@ class FraudBatchPredictor:
         return self.explainer.partial_dependence(
             feature, reference_data, model=model, kind=kind, grid_resolution=grid_resolution
         )
+
+    # ------------------------------------------------------------------ #
+    # Warm start — see FraudFeatureEngineer for the full docstrings.
+    # ------------------------------------------------------------------ #
+    def warm_start_from_history(self, history_df: pd.DataFrame, **kwargs) -> dict:
+        """Seed every returning customer's realtime lag/velocity state from a
+        slice of real transaction history (e.g. the last few hours/days from
+        your transactions table) before scoring a batch — so customers who
+        already exist in the database use their real history instead of
+        cold-starting. Call this once, e.g. right after `from_artifacts()`."""
+        return self.feature_engineer.warm_start_from_history(history_df, **kwargs)
+
+    def warm_start_customer(self, customer_id, history_df: pd.DataFrame) -> bool:
+        """Seed a single known customer's realtime state from their real
+        transaction history. See `FraudFeatureEngineer.warm_start_customer`."""
+        return self.feature_engineer.warm_start_customer(customer_id, history_df)
 
     # ------------------------------------------------------------------ #
     def save_state(self, artifacts_dir: str | Path = "models") -> None:

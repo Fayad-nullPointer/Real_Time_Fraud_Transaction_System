@@ -159,6 +159,35 @@ class FraudDetectionPipeline:
         return [self.process_transaction(tx, update_state=update_state) for tx in transactions]
 
     # ------------------------------------------------------------------ #
+    # Warm start — see FraudFeatureEngineer for the full docstrings.
+    # ------------------------------------------------------------------ #
+    def warm_start_from_history(self, history_df, **kwargs) -> dict:
+        """Seed every returning customer's realtime lag/velocity state from a
+        slice of real transaction history (e.g. the last few hours/days from
+        your transactions table) BEFORE this pipeline starts serving live
+        traffic. This is what makes a fresh deploy / restart behave like a
+        long-running production service instead of treating every existing
+        customer's next transaction as if they had no history: without this,
+        `process_transaction` would silently fall back to cold-start lag
+        features (customer's own mean_amount, zero velocity) for the first
+        transaction after every restart — call this once at startup instead."""
+        return self.feature_engineer.warm_start_from_history(history_df, **kwargs)
+
+    def warm_start_customer(self, customer_id, history_df) -> bool:
+        """Seed a single known customer's realtime state from their real
+        transaction history — e.g. lazily, the first time you see a
+        customer_id in this process and want to pull their recent history
+        from the DB before scoring their next transaction. See
+        `FraudFeatureEngineer.warm_start_customer`."""
+        return self.feature_engineer.warm_start_customer(customer_id, history_df)
+
+    def is_warm(self, customer_id) -> bool:
+        """True if this customer's realtime state already reflects real
+        history (from warm start or from having been scored before in this
+        process), False if their next transaction would still cold-start."""
+        return self.feature_engineer.is_warm(customer_id)
+
+    # ------------------------------------------------------------------ #
     def refresh_daily_risk_stats(self, newly_labeled_tx_df) -> None:
         """Call once per day (batch job) after fraud investigations for the
         previous day are confirmed, to roll terminal/neighborhood risk
