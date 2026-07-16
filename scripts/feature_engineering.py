@@ -72,6 +72,9 @@ FEATURE_COLS = [
     "mean_nb_tx_per_day",
     "nb_terminals",
     "day_of_week",
+    "terminal_tx_count_1h",
+    "terminal_tx_count_4h",
+    "terminal_distinct_customers_1h",
 ]
 
 
@@ -80,6 +83,12 @@ class _CustomerState:
     """Rolling, per-customer realtime state used for lag / velocity features."""
     last_amounts: Deque[float] = field(default_factory=lambda: deque(maxlen=3))
     recent_tx_times: Deque[pd.Timestamp] = field(default_factory=lambda: deque(maxlen=2000))
+
+@dataclass
+class _TerminalState:
+    """Rolling, per-terminal realtime state used for terminal velocity features."""
+    recent_tx_times: Deque[pd.Timestamp] = field(default_factory=lambda: deque(maxlen=2000))
+    recent_customers: Deque[int] = field(default_factory=lambda: deque(maxlen=2000))
 
 
 class FraudFeatureEngineer:
@@ -104,6 +113,9 @@ class FraudFeatureEngineer:
 
         # realtime per-customer state (lags / velocity)
         self._customer_state: Dict[int, _CustomerState] = defaultdict(_CustomerState)
+
+        # realtime per-terminal state
+        self._terminal_state: Dict[int, _TerminalState] = defaultdict(_TerminalState)
 
         self.is_fitted = False
 
@@ -146,7 +158,7 @@ class FraudFeatureEngineer:
         train_mask = tx["TX_DAY"] < TRAIN_DAYS
         self.peer_mean_lookup_ = (
             tx.loc[train_mask].assign(spending_tier=tx_tier[train_mask])
-            .groupby("spending_tier")["TX_AMOUNT"].mean()
+            .groupby("spending_tier", observed=False)["TX_AMOUNT"].mean()
         )
 
         # ---- daily terminal fraud aggregation (basis for rolling rates) --
@@ -310,6 +322,22 @@ class FraudFeatureEngineer:
         df = df_t.reset_index()
         df["night_velocity"] = (df["is_night"] * df["tx_count_1h"]).astype("int16")
 
+        # terminal velocity features
+        df = df.sort_values(["TERMINAL_ID", "TX_DATETIME"]).reset_index(drop=True)
+        df_t = df.set_index("TX_DATETIME")
+        df_t["terminal_tx_count_1h"] = (
+            df_t.groupby("TERMINAL_ID")["TX_AMOUNT"].transform(lambda x: x.rolling("1h", closed="left").count())
+        ).fillna(0).astype("int16")
+        df_t["terminal_tx_count_4h"] = (
+            df_t.groupby("TERMINAL_ID")["TX_AMOUNT"].transform(lambda x: x.rolling("4h", closed="left").count())
+        ).fillna(0).astype("int16")
+        df_t["terminal_distinct_customers_1h"] = (
+             df_t.groupby("TERMINAL_ID")["CUSTOMER_ID"].transform(
+                 lambda x: x.rolling("1h", closed="left").apply(lambda s: len(np.unique(s)), raw=True)
+             )
+        ).fillna(0).astype("int16")
+        df = df_t.reset_index()
+
         # terminal fraud rates (fitted lookups already built via fit())
         daily = self.daily_terminal_stats_
         df = df.merge(daily, on=["TERMINAL_ID", "TX_DAY"], how="left")
@@ -434,6 +462,15 @@ class FraudFeatureEngineer:
             "terminal_fraud_rate_28d": 0.0, "night_fraud_rate": 0.0, "neigh_fraud_rate": 0.0,
         })
 
+        t_state = self._terminal_state[term_id]
+        terminal_tx_count_1h = sum(1 for t in t_state.recent_tx_times if ts - t < pd.Timedelta(hours=1))
+        terminal_tx_count_4h = sum(1 for t in t_state.recent_tx_times if ts - t < pd.Timedelta(hours=4))
+        term_customers_1h = set(
+            c for t, c in zip(t_state.recent_tx_times, t_state.recent_customers)
+            if ts - t < pd.Timedelta(hours=1)
+        )
+        terminal_distinct_customers_1h = len(term_customers_1h)
+
         row = {
             "TX_AMOUNT": amount,
             "hour": hour,
@@ -460,6 +497,9 @@ class FraudFeatureEngineer:
             "mean_nb_tx_per_day": cust["mean_nb_tx_per_day"],
             "nb_terminals": cust["nb_terminals"],
             "day_of_week": day_of_week,
+            "terminal_tx_count_1h": terminal_tx_count_1h,
+            "terminal_tx_count_4h": terminal_tx_count_4h,
+            "terminal_distinct_customers_1h": terminal_distinct_customers_1h,
         }
         return pd.DataFrame([row], columns=FEATURE_COLS)
 
@@ -468,6 +508,7 @@ class FraudFeatureEngineer:
         Call this once you've decided the transaction is genuinely processed
         (so replay / re-scoring of the same event doesn't double-count)."""
         cust_id = tx["CUSTOMER_ID"]
+        term_id = tx["TERMINAL_ID"]
         ts = pd.Timestamp(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
         state = self._customer_state[cust_id]
@@ -477,6 +518,13 @@ class FraudFeatureEngineer:
         cutoff = ts - pd.Timedelta(hours=4)
         while state.recent_tx_times and state.recent_tx_times[0] < cutoff:
             state.recent_tx_times.popleft()
+
+        t_state = self._terminal_state[term_id]
+        t_state.recent_tx_times.append(ts)
+        t_state.recent_customers.append(cust_id)
+        while t_state.recent_tx_times and t_state.recent_tx_times[0] < cutoff:
+            t_state.recent_tx_times.popleft()
+            t_state.recent_customers.popleft()
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -489,8 +537,28 @@ class FraudFeatureEngineer:
 
     @classmethod
     def load(cls, path: str | Path) -> "FraudFeatureEngineer":
-        with open(path, "rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            raise TypeError(f"{path} does not contain a {cls.__name__}")
-        return obj
+        path = Path(path)
+        try:
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
+            if not isinstance(obj, cls):
+                raise TypeError(f"{path} does not contain a {cls.__name__}")
+            return obj
+        except Exception as exc:
+            # pandas categorical serialization can break across versions.
+            # Fall back to rebuilding the feature engineer from the packaged CSVs.
+            fallback_dir = path.parent.parent if path.parent.name == "models" else path.parent
+            data_dir = fallback_dir / "full dataset with brief"
+            if not data_dir.exists():
+                raise RuntimeError(
+                    f"Could not load feature engineer from {path} and no fallback data directory was found."
+                ) from exc
+
+            import pandas as pd
+
+            customer_df = pd.read_csv(data_dir / "customer_profiles.csv")
+            terminal_df = pd.read_csv(data_dir / "terminal_profiles.csv")
+            tx_df = pd.read_csv(data_dir / "synthetic_fraud_transactions.csv")
+            tx_df["TX_DATETIME"] = pd.to_datetime(tx_df["TX_DATETIME"])
+
+            return cls().fit(customer_df, terminal_df, tx_df)

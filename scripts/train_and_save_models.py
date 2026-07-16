@@ -156,7 +156,7 @@ def main():
     parser.add_argument(
         "--data-dir",
         type=str,
-        default=str(PROJECT_ROOT / "data"),
+        default=str(PROJECT_ROOT / "full dataset with brief"),
     )
 
     parser.add_argument(

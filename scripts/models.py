@@ -22,14 +22,20 @@ Both are persisted with joblib and reloaded through `FraudModelBundle.load`.
 
 from __future__ import annotations
 
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 import joblib
 import numpy as np
 import pandas as pd
+import shap
 
 warnings.filterwarnings(
     "ignore",
@@ -55,6 +61,7 @@ class FraudPrediction:
     scenario_id: Optional[int]
     scenario_name: Optional[str]
     scenario_confidence: Optional[float]
+    top_fraud_reasons: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +74,7 @@ class FraudPrediction:
                 round(float(self.scenario_confidence), 6)
                 if self.scenario_confidence is not None else None
             ),
+            "top_fraud_reasons": self.top_fraud_reasons,
         }
 
 
@@ -81,6 +89,7 @@ class FraudModelBundle:
         self.fraud_model = fraud_model
         self.scenario_model = scenario_model
         self.fraud_threshold = fraud_threshold
+        self._explainer = None
 
     # ------------------------------------------------------------------ #
     def predict_one(self, features: pd.DataFrame, transaction_id=None) -> FraudPrediction:
@@ -91,12 +100,39 @@ class FraudModelBundle:
         is_fraud = fraud_prob >= self.fraud_threshold
 
         scenario_id, scenario_conf = None, None
-        if is_fraud and self.scenario_model is not None:
-            proba = self.scenario_model.predict_proba(X)[0]
-            classes = self.scenario_model.classes_
-            best_idx = int(np.argmax(proba))
-            scenario_id = int(classes[best_idx])
-            scenario_conf = float(proba[best_idx])
+        top_reasons = None
+        if is_fraud:
+            # SHAP Explanations
+            if self._explainer is None:
+                clf = self.fraud_model.named_steps["clf"]
+                self._explainer = shap.TreeExplainer(clf)
+                
+            preprocessor = self.fraud_model.named_steps["preprocess"]
+            X_transformed = preprocessor.transform(X)
+            
+            # SHAP handles dense arrays better when predicting single rows
+            if hasattr(X_transformed, "toarray"):
+                X_transformed = X_transformed.toarray()
+                
+            shap_values = self._explainer.shap_values(X_transformed)
+            # Depending on LGBM objective, shap_values might be a list
+            if isinstance(shap_values, list):
+                row_shap = shap_values[1][0]
+            else:
+                row_shap = shap_values[0]
+                
+            feature_names = preprocessor.get_feature_names_out()
+            contributions = list(zip(feature_names, row_shap))
+            contributions.sort(key=lambda x: x[1], reverse=True)
+            top_reasons = {feat: round(float(val), 4) for feat, val in contributions[:3] if val > 0}
+
+            # Scenario Prediction
+            if self.scenario_model is not None:
+                proba = self.scenario_model.predict_proba(X)[0]
+                classes = self.scenario_model.classes_
+                best_idx = int(np.argmax(proba))
+                scenario_id = int(classes[best_idx])
+                scenario_conf = float(proba[best_idx])
 
         return FraudPrediction(
             transaction_id=transaction_id,
@@ -105,6 +141,7 @@ class FraudModelBundle:
             scenario_id=scenario_id,
             scenario_name=SCENARIO_NAMES.get(scenario_id) if scenario_id is not None else None,
             scenario_confidence=scenario_conf,
+            top_fraud_reasons=top_reasons,
         )
 
     def predict_batch(self, features_df: pd.DataFrame) -> pd.DataFrame:
@@ -132,6 +169,7 @@ class FraudModelBundle:
             SCENARIO_NAMES.get(int(s)) if not np.isnan(s) else None for s in scenario_id
         ]
         out["scenario_confidence"] = scenario_conf
+        out["top_fraud_reasons"] = None
         return out
 
     # ------------------------------------------------------------------ #

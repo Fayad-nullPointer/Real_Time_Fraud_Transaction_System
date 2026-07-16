@@ -38,8 +38,13 @@ stateful, real-time scoring.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Iterable, List
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from feature_engineering import FraudFeatureEngineer
 from models import FraudModelBundle, FraudPrediction
@@ -66,6 +71,17 @@ class FraudDetectionPipeline:
     def from_artifacts(cls, artifacts_dir: str | Path = "models") -> "FraudDetectionPipeline":
         """Load the fitted feature engineer + both trained models from disk."""
         artifacts_dir = Path(artifacts_dir)
+        if not artifacts_dir.exists():
+            candidate = Path(__file__).resolve().parent.parent / artifacts_dir
+            if candidate.exists():
+                artifacts_dir = candidate
+        if not artifacts_dir.exists():
+            raise FileNotFoundError(
+                f"Artifacts directory not found: {artifacts_dir}. "
+                "Pass the correct path relative to the current working directory or repo root. "
+                "For example: FraudDetectionPipeline.from_artifacts('models') from the project root, "
+                "or FraudDetectionPipeline.from_artifacts(Path(__file__).resolve().parent.parent / 'models')."
+            )
         fe = FraudFeatureEngineer.load(artifacts_dir / "feature_engineer.pkl")
         bundle = FraudModelBundle.load(artifacts_dir)
         logger.info("Loaded feature engineer and model bundle from %s", artifacts_dir)

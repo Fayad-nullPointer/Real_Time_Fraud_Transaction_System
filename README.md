@@ -1,78 +1,77 @@
-# Fraud Detection Inference Pipeline
+# 🛡️ Real-Time Fraud Detection Inference Pipeline
 
-Reproduces the feature engineering from `02-preprocessing_and_feature_engineering.ipynb`
-and the modeling approach from `04-engineered_features_model.ipynb` /
-`05-balanced__base_model.ipynb` / `fraud_modelling_optimized.ipynb` as a
-reusable, OOP, production-style pipeline.
+Welcome to the production-ready inference pipeline for our Fraud Detection project! This repository contains the object-oriented, reusable machinery required to take raw transactions, engineer features on the fly, and run them through our trained models to predict and categorize fraudulent activity.
 
-## Files
+This documentation is tailored to help developer teammates understand the architecture, get the models running locally, and effectively perform inference.
 
-| File | Purpose |
-|---|---|
-| `feature_engineering.py` | `FraudFeatureEngineer` — builds all 25 engineered features. Has a **batch** mode (`fit` + `build_training_frames`, used once to train) and a **stateful online** mode (`transform` + `register_realtime_state`, used per incoming transaction). |
-| `models.py` | `FraudModelBundle` — wraps the two trained models (fraud probability + fraud scenario) with a single `predict_one` / `predict_batch` API, plus save/load. |
-| `train_and_save_models.py` | Run once (or on a retraining cadence) to fit the feature engineer and train + save the best models. |
-| `fraud_pipeline.py` | **The main entry point.** `FraudDetectionPipeline` — takes a new transaction, engineers its features, and returns a fraud probability + scenario prediction. |
+---
 
-## Two models, as requested
+## 🚀 Added Feature: Real-Time SHAP Explainability (`top_fraud_reasons`)
 
-1. **Fraud detector** (binary): P(transaction is fraud). LightGBM inside a
-   `StandardScaler + OneHotEncoder` sklearn `Pipeline`, `class_weight="balanced"`,
-   with an F1-optimal decision threshold picked on the holdout split — this
-   matches the approach in `04-engineered_features_model.ipynb` and the
-   LightGBM configuration recommended as the production model in
-   `fraud_modelling_optimized.ipynb`.
+We have introduced **TreeSHAP Explainability** directly into the inference pipeline! When a transaction is flagged as fraud, the pipeline doesn't just return a binary flag or probability—it now provides the **Top 3 contributing features** that led to the fraud decision. 
 
-2. **Scenario detector** (multiclass, 1/2/3 = Large Amount / Skimming /
-   Credential Takeover): trained on the fraud-flagged rows only, using the
-   same 25 engineered features. This one wasn't saved as a standalone
-   artifact in the notebooks — scenario recall was only measured as a
-   breakdown of the binary model's flags — so it's newly built here as a
-   dedicated LightGBM multiclass model, following the same feature set and
-   pipeline style, to give you an actual "which attack pattern" model rather
-   than just recall statistics. It only fires when the fraud detector flags
-   a transaction.
+This transparency is invaluable for risk investigators, debugging, and auditing our model's decisions. 
 
-## Why "online transform" isn't identical to the notebook's batch code
+**Example output for a flagged transaction:**
+```json
+{
+  "TRANSACTION_ID": 123456,
+  "fraud_probability": 0.87,
+  "is_fraud": true,
+  "scenario_id": 3,
+  "scenario_name": "Credential Takeover",
+  "scenario_confidence": 0.74,
+  "top_fraud_reasons": {
+    "PREV_TX_AMOUNT_lag1": 2.4153,
+    "tx_count_1h": 1.1892,
+    "terminal_fraud_rate_1d": 0.8921
+  }
+}
+```
 
-Several features (`tx_count_1h/4h`, `PREV_TX_AMOUNT_lag1/2/3`, `terminal_fraud_rate_*`,
-`neigh_fraud_rate`) are computed from **rolling history**, not from a single
-row. For a brand-new incoming transaction you don't have "the whole
-dataframe" to roll over — so:
+---
 
-- **Lag / velocity features** (fast-changing, no label needed) are kept as an
-  in-memory per-customer buffer (`_CustomerState`) inside `FraudFeatureEngineer`,
-  updated after each transaction via `register_realtime_state`.
-- **Terminal/neighborhood fraud-rate features** (slow-changing, *require*
-  confirmed fraud labels from previous days) are precomputed once a day and
-  cached in `terminal_risk_lookup_`. Call `refresh_daily_risk_stats(...)`
-  once per day (a scheduled batch job, after fraud investigations for the
-  previous day are finalized) — never at request time, so nothing about
-  "today" ever leaks into scoring "today"'s transactions.
+## 🛠️ System Architecture
 
-## Usage
+### 1. The Models
+The pipeline incorporates two models inside `FraudModelBundle`:
+1. **Fraud Detector (Binary):** A LightGBM classifier embedded in a `scikit-learn` pipeline (`StandardScaler` + `OneHotEncoder`). It predicts `P(transaction is fraud)` and evaluates it against an F1-optimal threshold.
+2. **Scenario Detector (Multiclass):** Trained exclusively on fraud-flagged rows. If a transaction is identified as fraud, this model classifies the attack pattern (Large Amount, Skimming, or Credential Takeover).
 
-### 1. Train once (or on a schedule) from your raw CSVs
+### 2. Real-Time Feature Engineering
+Notebook code operates on batch logic (using `.shift()` or `.rolling()`), but incoming transactions arrive one by one. The `FraudFeatureEngineer` elegantly bridges this gap:
+- **Fast-changing Lag/Velocity Features:** Managed using an in-memory, per-customer buffer (`_CustomerState`) that updates after every transaction.
+- **Slow-changing Fraud-Rate Features:** (e.g., terminal/neighborhood risk) Are precomputed daily via a scheduled batch job so that future leakages are prevented.
+
+---
+
+## 💻 How to Run Inference
+
+There are a few distinct ways to run inference, depending on your needs.
+
+### Method A: Running the Dedicated Inference Script (Recommended for Testing)
+
+We provide a dedicated `inference.py` script specifically designed to test different transaction scenarios (Normal vs. Large Amount vs. Skimming vs. Credential Takeover) and verify the outputs, including the new TreeSHAP explanations.
 
 ```bash
-uv run .\scripts\train_and_save_models.py
+# Run the inference script
+uv run inference.py
+# OR
+python inference.py
 ```
+*Note: Ensure your `full dataset with brief/synthetic_fraud_transactions.csv` is populated with the required data.*
 
-This produces:
-```
-models/feature_engineer.pkl
-models/fraud_detector.joblib
-models/scenario_detector.joblib
-models/fraud_threshold.joblib
-```
+### Method B: Integrating into Your App (Python API)
 
-### 2. Score new transactions in real time
+If you are wiring this pipeline into a FastAPI endpoint, Kafka consumer, or background worker, import and utilize the `FraudDetectionPipeline`.
 
 ```python
-from fraud_pipeline import FraudDetectionPipeline
+from scripts.fraud_pipeline import FraudDetectionPipeline
 
+# 1. Load the pre-trained artifacts (feature engineer, models, threshold)
 pipeline = FraudDetectionPipeline.from_artifacts("models")
 
+# 2. Define your raw incoming transaction
 new_tx = {
     "TRANSACTION_ID": 123456,
     "CUSTOMER_ID": 42,
@@ -81,41 +80,50 @@ new_tx = {
     "TX_AMOUNT": 189.50,
 }
 
-result = pipeline.process_transaction(new_tx)
-print(result.to_dict())
-# {'TRANSACTION_ID': 123456, 'fraud_probability': 0.87, 'is_fraud': True,
-#  'scenario_id': 3, 'scenario_name': 'Credential Takeover',
-#  'scenario_confidence': 0.74}
+# 3. Process the transaction end-to-end
+prediction = pipeline.process_transaction(new_tx)
+print(prediction.to_dict())
 ```
+**Important:** Make sure to feed transactions **in chronological order per customer** so that the lag/velocity feature states are accurately maintained!
 
-Feed transactions **in chronological order per customer** — exactly like the
-notebooks' `sort_values(["CUSTOMER_ID", "TX_DATETIME"])` — so lag/velocity
-features stay correct.
+### Method C: Quick CLI Smoke Test
 
-### 3. CLI smoke test
+You can test arbitrary JSON transactions directly from your terminal using `fraud_pipeline.py`.
 
 ```bash
-python fraud_pipeline.py --artifacts-dir models --transaction-json \
+python scripts/fraud_pipeline.py --artifacts-dir models --transaction-json \
   '{"TRANSACTION_ID":1,"CUSTOMER_ID":42,"TERMINAL_ID":917,"TX_DATETIME":"2026-07-05 02:14:00","TX_AMOUNT":189.5}'
 ```
 
-### 4. Daily batch refresh (rolling fraud-rate features)
+---
+
+## ⚙️ Maintenance & Retraining
+
+### 1. Training from Scratch
+Run the training script to generate fresh models and feature engineered state from your raw CSV data.
+
+```bash
+uv run scripts/train_and_save_models.py
+```
+*Outputs saved to `models/`: `feature_engineer.pkl`, `fraud_detector.joblib`, `scenario_detector.joblib`, `fraud_threshold.joblib`.*
+
+### 2. Daily Batch Refresh
+To ensure the model has up-to-date historical risk metrics (like terminal fraud rates), run a daily batch job after yesterday's fraud investigations are complete:
 
 ```python
-pipeline.refresh_daily_risk_stats(newly_labeled_tx_df)   # once per day
-pipeline.save_state("models")                             # persist realtime state
+# Assuming newly_labeled_tx_df contains yesterday's confirmed transactions
+pipeline.refresh_daily_risk_stats(newly_labeled_tx_df)   # Refreshes lookups
+pipeline.save_state("models")                             # Persists realtime lag states
 ```
 
-## Notes / assumptions
+---
 
-- Requires `pandas`, `numpy`, `scipy`, `scikit-learn`, `lightgbm`, `joblib`.
-- `customer_profiles.csv` and `terminal_profiles.csv` columns are assumed
-  identical to the ones already used across your notebooks
-  (`x_customer_id`, `y_customer_id`, `mean_amount`, `std_amount`,
-  `mean_nb_tx_per_day`, `nb_terminals`, `x_terminal_id`, `y_terminal_id`).
-- `dropped columns` from `04`/`05` notebooks (`day_of_week`, `nb_terminals`,
-  `mean_nb_tx_per_day`) were dropped there for a specific ablation; this
-  pipeline keeps the full 25-feature set (matching notebook 02's final
-  `FEATURE_COLS`) since more signal is generally better for production use.
-  Drop columns in `train_and_save_models.py` if you want to match that
-  ablation exactly.
+## 📁 File Structure Reference
+
+| File / Module | Description |
+|---|---|
+| **`scripts/feature_engineering.py`** | `FraudFeatureEngineer` — Handles computation of all 25 features. Features batch (`fit`) and stateful online modes (`transform`). |
+| **`scripts/models.py`** | `FraudModelBundle` — Wrapper handling binary fraud prediction, multiclass scenario prediction, and SHAP explainability. |
+| **`scripts/fraud_pipeline.py`** | `FraudDetectionPipeline` — The primary entry point orchestrating feature engineering and model prediction seamlessly. |
+| **`inference.py`** | Hands-on test script showcasing inference across normal transactions and all 3 fraud scenarios. |
+| **`scripts/train_and_save_models.py`** | Batch training script to execute feature engineering, train models, and serialize artifacts to disk. |
