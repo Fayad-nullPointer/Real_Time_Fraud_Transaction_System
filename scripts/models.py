@@ -55,6 +55,15 @@ class FraudPrediction:
     scenario_id: Optional[int]
     scenario_name: Optional[str]
     scenario_confidence: Optional[float]
+    # True if this transaction's CUSTOMER_ID had no training-time profile and
+    # was scored on a population-default profile (see
+    # `FraudFeatureEngineer.register_new_customer` / `is_cold_start`).
+    # Not set by `FraudModelBundle` itself (it has no view of the feature
+    # engineer) — callers (`fraud_pipeline.py`, `batch_predictor.py`) set it
+    # after the fact from `feature_engineer.is_cold_start(...)`. Downstream
+    # consumers (dashboard, alerting) can use this to apply extra scrutiny
+    # to fresh accounts rather than trusting a score built on defaults.
+    is_cold_start: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +76,7 @@ class FraudPrediction:
                 round(float(self.scenario_confidence), 6)
                 if self.scenario_confidence is not None else None
             ),
+            "is_cold_start": bool(self.is_cold_start),
         }
 
 

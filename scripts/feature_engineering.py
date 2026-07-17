@@ -28,6 +28,7 @@ Two usage modes
 
 from __future__ import annotations
 
+import logging
 import pickle
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ from typing import Deque, Dict, Optional
 import numpy as np
 import pandas as pd
 from scipy.spatial import KDTree
+
+logger = logging.getLogger("feature_engineering")
 
 NIGHT_HOURS = {0, 1, 2, 3, 4}
 SMALL_TX = 10.0
@@ -83,6 +86,14 @@ class _CustomerState:
     """Rolling, per-customer realtime state used for lag / velocity features."""
     last_amounts: Deque[float] = field(default_factory=lambda: deque(maxlen=3))
     recent_tx_times: Deque[pd.Timestamp] = field(default_factory=lambda: deque(maxlen=2000))
+    # Online (Welford's algorithm) running mean/variance of this customer's
+    # OWN transaction amounts. Only accumulated for cold-started customers —
+    # this is what lets a brand-new customer's profile self-correct away
+    # from the population default toward their real behavior, one
+    # transaction at a time, with no retraining and O(1) work per update.
+    running_n: int = 0
+    running_mean: float = 0.0
+    running_m2: float = 0.0
 
 @dataclass
 class _TerminalState:
@@ -116,6 +127,20 @@ class FraudFeatureEngineer:
 
         # realtime per-terminal state
         self._terminal_state: Dict[int, _TerminalState] = defaultdict(_TerminalState)
+
+        # --- new-customer cold start -----------------------------------
+        # Population-level fallback stats (set at fit time) used to build a
+        # profile for a customer who didn't exist in the training data.
+        self.global_defaults_: Dict[str, float] = {}
+        # CUSTOMER_IDs currently running on a default (not yet "real")
+        # profile. Membership here is what `is_cold_start()` reports and
+        # what `register_realtime_state` uses to know whose stats to learn
+        # online. A customer is removed from this set once they've sent
+        # enough real transactions to trust their own observed mean/std.
+        self._cold_start_ids: set = set()
+        # How many of a new customer's own transactions to observe before
+        # replacing the population-default mean/std with their real ones.
+        self.COLD_START_PROMOTE_AFTER: int = 5
 
         self.is_fitted = False
 
@@ -153,6 +178,18 @@ class FraudFeatureEngineer:
         )
         self.customer_tier_ = pd.Series(tiers.values, index=customer_df["CUSTOMER_ID"])
 
+        # ---- population defaults for brand-new (never-trained-on) customers
+        # Cheap to compute once here; used by `register_new_customer` so a
+        # customer who signs up after training never crashes `transform()`.
+        self.global_defaults_ = {
+            "mean_amount": float(customer_df["mean_amount"].mean()),
+            "std_amount": float(customer_df["std_amount"].mean()),
+            "mean_nb_tx_per_day": float(customer_df["mean_nb_tx_per_day"].median()),
+            "nb_terminals": float(customer_df["nb_terminals"].median()),
+            "x_customer_id": float(customer_df["x_customer_id"].mean()),
+            "y_customer_id": float(customer_df["y_customer_id"].mean()),
+        }
+
         # ---- peer group mean, fit on TRAIN rows only ---------------------
         tx_tier = tx["CUSTOMER_ID"].map(self.customer_tier_)
         train_mask = tx["TX_DAY"] < TRAIN_DAYS
@@ -172,6 +209,69 @@ class FraudFeatureEngineer:
 
         self.is_fitted = True
         return self
+
+    # ------------------------------------------------------------------ #
+    # New-customer cold start
+    # ------------------------------------------------------------------ #
+    def register_new_customer(
+        self, customer_id, *, x: Optional[float] = None, y: Optional[float] = None,
+        mean_amount: Optional[float] = None, std_amount: Optional[float] = None,
+        mean_nb_tx_per_day: Optional[float] = None, nb_terminals: Optional[float] = None,
+    ) -> None:
+        """
+        Give a customer who was never in the training data (i.e. signed up
+        after the feature engineer was fit) a usable profile immediately,
+        using population-level defaults for anything not supplied — so
+        `transform()` never has to crash on an unknown CUSTOMER_ID.
+
+        This is O(1): it only inserts one row into `customer_profiles_` /
+        `customer_tier_`, no retraining and no rebuilding of any lookup
+        table. The customer is marked cold-started; `register_realtime_state`
+        will incrementally learn their real mean/std from their own
+        transactions and silently promote them once
+        `COLD_START_PROMOTE_AFTER` transactions have been observed.
+
+        Safe to call more than once for the same id (idempotent no-op if
+        the customer already has a REAL, non-default profile).
+        Pass explicit `x`/`y`/etc. if you know anything about the new
+        customer at signup time (e.g. their registered address) — anything
+        left as None falls back to the population default.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Call `.fit()` before registering new customers.")
+        if customer_id in self.customer_profiles_.index and customer_id not in self._cold_start_ids:
+            return  # already a known, real customer — never clobber real stats
+
+        d = self.global_defaults_
+        profile = {
+            "x_customer_id": x if x is not None else d["x_customer_id"],
+            "y_customer_id": y if y is not None else d["y_customer_id"],
+            "mean_amount": mean_amount if mean_amount is not None else d["mean_amount"],
+            "std_amount": std_amount if std_amount is not None else d["std_amount"],
+            "mean_nb_tx_per_day": mean_nb_tx_per_day if mean_nb_tx_per_day is not None else d["mean_nb_tx_per_day"],
+            "nb_terminals": nb_terminals if nb_terminals is not None else d["nb_terminals"],
+        }
+        self.customer_profiles_.loc[customer_id] = profile
+
+        tier = pd.cut(
+            [profile["mean_amount"]], bins=self.tier_bins_,
+            labels=self.tier_labels_, include_lowest=True,
+        )[0]
+        self.customer_tier_.loc[customer_id] = (
+            tier if pd.notna(tier) else self.tier_labels_[len(self.tier_labels_) // 2]
+        )
+
+        self._cold_start_ids.add(customer_id)
+        logger.info(
+            "Registered new CUSTOMER_ID=%s with a population-default profile "
+            "(cold start) — will self-correct after %d real transactions.",
+            customer_id, self.COLD_START_PROMOTE_AFTER,
+        )
+
+    def is_cold_start(self, customer_id) -> bool:
+        """True if `customer_id` is still being scored on a population-
+        default profile rather than their own real, learned statistics."""
+        return customer_id in self._cold_start_ids
 
     # ------------------------------------------------------------------ #
     # Daily risk-stat maintenance (call nightly with newly confirmed labels)
@@ -414,7 +514,10 @@ class FraudFeatureEngineer:
         amount = float(tx["TX_AMOUNT"])
 
         if cust_id not in self.customer_profiles_.index:
-            raise KeyError(f"Unknown CUSTOMER_ID {cust_id}: no profile on file.")
+            # Brand-new customer (added after training) — don't fail the
+            # transaction, bootstrap them with a population-default profile
+            # instead. See `register_new_customer` / `is_cold_start`.
+            self.register_new_customer(cust_id)
         if term_id not in self.terminal_profiles_.index:
             raise KeyError(f"Unknown TERMINAL_ID {term_id}: no profile on file.")
 
@@ -525,6 +628,38 @@ class FraudFeatureEngineer:
         while t_state.recent_tx_times and t_state.recent_tx_times[0] < cutoff:
             t_state.recent_tx_times.popleft()
             t_state.recent_customers.popleft()
+
+        # --- new-customer cold start: learn their real stats online ------
+        # Welford's algorithm — O(1) per transaction, numerically stable,
+        # no retraining. Only runs for customers still on a population
+        # default; once promoted they're indistinguishable from any other
+        # known customer.
+        if cust_id in self._cold_start_ids:
+            state.running_n += 1
+            delta = amount - state.running_mean
+            state.running_mean += delta / state.running_n
+            state.running_m2 += delta * (amount - state.running_mean)
+
+            if state.running_n >= self.COLD_START_PROMOTE_AFTER:
+                observed_std = (
+                    float(np.sqrt(state.running_m2 / (state.running_n - 1)))
+                    if state.running_n > 1 else self.global_defaults_["std_amount"]
+                )
+                observed_std = observed_std or self.global_defaults_["std_amount"]  # guard std==0
+                self.customer_profiles_.loc[cust_id, "mean_amount"] = state.running_mean
+                self.customer_profiles_.loc[cust_id, "std_amount"] = observed_std
+                tier = pd.cut(
+                    [state.running_mean], bins=self.tier_bins_,
+                    labels=self.tier_labels_, include_lowest=True,
+                )[0]
+                if pd.notna(tier):
+                    self.customer_tier_.loc[cust_id] = tier
+                self._cold_start_ids.discard(cust_id)
+                logger.info(
+                    "CUSTOMER_ID=%s promoted out of cold start after %d transactions "
+                    "(learned mean_amount=%.2f, std_amount=%.2f).",
+                    cust_id, state.running_n, state.running_mean, observed_std,
+                )
 
     # ------------------------------------------------------------------ #
     # Persistence
