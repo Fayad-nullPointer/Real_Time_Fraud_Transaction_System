@@ -31,6 +31,19 @@ This transparency is invaluable for risk investigators, debugging, and auditing 
 
 ---
 
+## 📱 Added Feature: Twilio WhatsApp OTP Verification
+
+To close the loop on real-time fraud mitigation, the pipeline integrates directly with the **Twilio WhatsApp API**.
+
+When a transaction is flagged as fraud (`is_fraud == True`), the following automated workflow is triggered:
+1. **OTP Generation:** The system instantly generates a secure 6-digit OTP.
+2. **WhatsApp Alert:** A customized alert is sent via WhatsApp to the user's registered phone number (pulled from the transaction payload). It includes the exact transaction amount and terminal ID.
+3. **Pending State:** The inference pipeline enters a **Pending State**, suspending the transaction until the user types the exact OTP into their interface to confirm the purchase. 
+
+This ensures that high-risk transactions are verified by a human-in-the-loop (the actual cardholder) before any money is lost.
+
+---
+
 ## 🛠️ System Architecture
 
 ### 1. The Models
