@@ -72,7 +72,7 @@ logger = logging.getLogger("batch_predictor")
 
 OUTPUT_COLUMNS = [
     "TRANSACTION_ID", "fraud_probability", "is_fraud",
-    "scenario_id", "scenario_name", "scenario_confidence",
+    "scenario_id", "scenario_name", "scenario_confidence", "is_cold_start",
 ]
 
 
@@ -175,6 +175,12 @@ class FraudBatchPredictor:
             try:
                 features = self.feature_engineer.transform(tx)
                 prediction = self.model_bundle.predict_one(features, transaction_id=tx_id)
+                # Flag rows scored on a population-default profile because
+                # this CUSTOMER_ID wasn't in the training data. Checked
+                # BEFORE register_realtime_state, which may promote the
+                # customer out of cold start as a side effect of recording
+                # this same transaction.
+                prediction.is_cold_start = self.feature_engineer.is_cold_start(tx["CUSTOMER_ID"])
                 if update_state:
                     self.feature_engineer.register_realtime_state(tx)
                 prediction_rows.append(prediction.to_dict())
@@ -192,6 +198,7 @@ class FraudBatchPredictor:
                     "TRANSACTION_ID": tx_id,
                     "fraud_probability": None, "is_fraud": None,
                     "scenario_id": None, "scenario_name": None, "scenario_confidence": None,
+                    "is_cold_start": None,
                 })
 
         predictions_df = pd.DataFrame(prediction_rows, columns=OUTPUT_COLUMNS)

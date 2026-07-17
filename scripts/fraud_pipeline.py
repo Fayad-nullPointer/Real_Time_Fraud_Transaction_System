@@ -153,6 +153,11 @@ class FraudDetectionPipeline:
         """
         features = self.feature_engineer.transform(tx)
         prediction = self.model_bundle.predict_one(features, transaction_id=tx.get("TRANSACTION_ID"))
+        # Flag scores that were made on a population-default profile because
+        # this CUSTOMER_ID wasn't in the training data (brand-new customer).
+        # Checked BEFORE register_realtime_state, which may promote them
+        # out of cold start as a side effect of recording this transaction.
+        prediction.is_cold_start = self.feature_engineer.is_cold_start(tx["CUSTOMER_ID"])
 
         if update_state:
             self.feature_engineer.register_realtime_state(tx)

@@ -151,3 +151,106 @@
 {"timestamp": "2026-07-17 20:53:09,352", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]366186[/white]"}
 {"timestamp": "2026-07-17 20:53:09,356", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 21532 suspended. Waiting for user to enter OTP..."}
 {"timestamp": "2026-07-17 20:53:15,248", "level": "INFO", "name": "fraud_pipeline", "message": "[bold green]\u2705 OTP confirmed for tx=21532.[/bold green]", "event_type": "OTP_VERIFIED", "transaction_id": 21532, "status": "APPROVED"}
+{"timestamp": "2026-07-17 22:07:51,308", "level": "INFO", "name": "inference", "message": "[bold cyan]Loading feature engineering, models, and threshold from:[/bold cyan] D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models..."}
+{"timestamp": "2026-07-17 22:07:51,600", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-17 22:07:52,600", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-17 22:07:52,603", "level": "INFO", "name": "inference", "message": "Loading sample transactions from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\full dataset with brief/synthetic_fraud_transactions.csv..."}
+{"timestamp": "2026-07-17 22:07:52,607", "level": "ERROR", "name": "inference", "message": "Could not find the dataset. Make sure you have the synthetic data generated."}
+{"timestamp": "2026-07-17 22:09:48,018", "level": "INFO", "name": "inference", "message": "[bold cyan]Loading feature engineering, models, and threshold from:[/bold cyan] D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models..."}
+{"timestamp": "2026-07-17 22:09:48,161", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-17 22:09:49,160", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-17 22:09:49,162", "level": "INFO", "name": "inference", "message": "Loading sample transactions from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\data/synthetic_fraud_transactions.csv..."}
+{"timestamp": "2026-07-17 22:09:52,485", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:09:52,487", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 1. NORMAL (Non-Fraud)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:09:52,489", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:09:52,490", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:19:28,286", "level": "INFO", "name": "inference", "message": "[bold cyan]Loading feature engineering, models, and threshold from:[/bold cyan] D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models..."}
+{"timestamp": "2026-07-17 22:19:28,491", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-17 22:19:29,458", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-17 22:19:29,460", "level": "INFO", "name": "inference", "message": "Loading sample transactions from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\data/synthetic_fraud_transactions.csv..."}
+{"timestamp": "2026-07-17 22:19:32,685", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:32,687", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 1. NORMAL (Non-Fraud)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:32,688", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:32,690", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:19:33,138", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:19:33,140", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:33,142", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 2. SCENARIO 1 (Large Amount)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:33,144", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:19:33,146", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:19:33,169", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 50116 | Prob: 0.997 | Scenario: Large Amount", "event_type": "FRAUD_DETECTED", "transaction_id": 50116, "fraud_probability": 0.9970395630933986, "scenario": "Large Amount"}
+{"timestamp": "2026-07-17 22:19:33,210", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201093836155", "event_type": "OTP_REQUESTED", "phone": "+201093836155", "transaction_id": 50116}
+{"timestamp": "2026-07-17 22:19:36,550", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:19:36,553", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:19:36,556", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]214237[/white]"}
+{"timestamp": "2026-07-17 22:19:36,558", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 50116 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:20:21,616", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=50116.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 50116, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:20:21,624", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
+{"timestamp": "2026-07-17 22:20:21,625", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:21,627", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 3. SCENARIO 2 (Terminal Skimming)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:21,629", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:21,631", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:20:21,651", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 1599688 | Prob: 1.000 | Scenario: Terminal Skimming", "event_type": "FRAUD_DETECTED", "transaction_id": 1599688, "fraud_probability": 0.9996044960555633, "scenario": "Terminal Skimming"}
+{"timestamp": "2026-07-17 22:20:21,653", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201093836155", "event_type": "OTP_REQUESTED", "phone": "+201093836155", "transaction_id": 1599688}
+{"timestamp": "2026-07-17 22:20:22,009", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:20:22,011", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:20:22,014", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]167466[/white]"}
+{"timestamp": "2026-07-17 22:20:22,016", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 1599688 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:20:28,381", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=1599688.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 1599688, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:20:28,395", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
+{"timestamp": "2026-07-17 22:20:28,397", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:28,398", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 4. SCENARIO 3 (Credential Takeover)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:28,400", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:28,401", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:20:28,424", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 21532 | Prob: 0.995 | Scenario: Credential Takeover", "event_type": "FRAUD_DETECTED", "transaction_id": 21532, "fraud_probability": 0.9952133166970093, "scenario": "Credential Takeover"}
+{"timestamp": "2026-07-17 22:20:28,426", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201093836155", "event_type": "OTP_REQUESTED", "phone": "+201093836155", "transaction_id": 21532}
+{"timestamp": "2026-07-17 22:20:28,758", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:20:28,760", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:20:28,763", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]880616[/white]"}
+{"timestamp": "2026-07-17 22:20:28,765", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 21532 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:20:31,478", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=21532.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 21532, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:20:31,480", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
+{"timestamp": "2026-07-17 22:20:47,387", "level": "INFO", "name": "inference", "message": "[bold cyan]Loading feature engineering, models, and threshold from:[/bold cyan] D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models..."}
+{"timestamp": "2026-07-17 22:20:47,523", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-17 22:20:48,604", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-17 22:20:48,606", "level": "INFO", "name": "inference", "message": "Loading sample transactions from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\data/synthetic_fraud_transactions.csv..."}
+{"timestamp": "2026-07-17 22:20:51,881", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:51,883", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 1. NORMAL (Non-Fraud)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:51,884", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:51,886", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:20:52,326", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:20:52,328", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:52,330", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 2. SCENARIO 1 (Large Amount)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:52,332", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:20:52,334", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:20:52,354", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 50116 | Prob: 0.997 | Scenario: Large Amount", "event_type": "FRAUD_DETECTED", "transaction_id": 50116, "fraud_probability": 0.9970395630933986, "scenario": "Large Amount"}
+{"timestamp": "2026-07-17 22:20:52,359", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201154306561", "event_type": "OTP_REQUESTED", "phone": "+201154306561", "transaction_id": 50116}
+{"timestamp": "2026-07-17 22:20:53,771", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:20:53,774", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:20:53,776", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]992119[/white]"}
+{"timestamp": "2026-07-17 22:20:53,779", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 50116 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:22:10,997", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=50116.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 50116, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:22:10,999", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
+{"timestamp": "2026-07-17 22:22:11,000", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:11,002", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 3. SCENARIO 2 (Terminal Skimming)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:11,004", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:11,005", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:22:11,024", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 1599688 | Prob: 1.000 | Scenario: Terminal Skimming", "event_type": "FRAUD_DETECTED", "transaction_id": 1599688, "fraud_probability": 0.9996044960555633, "scenario": "Terminal Skimming"}
+{"timestamp": "2026-07-17 22:22:11,027", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201154306561", "event_type": "OTP_REQUESTED", "phone": "+201154306561", "transaction_id": 1599688}
+{"timestamp": "2026-07-17 22:22:11,707", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:22:11,710", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:22:11,712", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]330892[/white]"}
+{"timestamp": "2026-07-17 22:22:11,716", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 1599688 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:22:51,419", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=1599688.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 1599688, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:22:51,421", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
+{"timestamp": "2026-07-17 22:22:51,422", "level": "INFO", "name": "inference", "message": "\n[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:51,423", "level": "INFO", "name": "inference", "message": "[bold magenta]Testing Case: 4. SCENARIO 3 (Credential Takeover)[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:51,425", "level": "INFO", "name": "inference", "message": "[bold magenta]==================================================[/bold magenta]"}
+{"timestamp": "2026-07-17 22:22:51,427", "level": "INFO", "name": "inference", "message": "Incoming Raw Transaction:"}
+{"timestamp": "2026-07-17 22:22:51,440", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\ud83d\udea8 FRAUD FLAGGED[/bold red] | TX: 21532 | Prob: 0.995 | Scenario: Credential Takeover", "event_type": "FRAUD_DETECTED", "transaction_id": 21532, "fraud_probability": 0.9952133166970093, "scenario": "Credential Takeover"}
+{"timestamp": "2026-07-17 22:22:51,441", "level": "INFO", "name": "fraud_pipeline", "message": "Triggering Twilio WhatsApp OTP for phone number: +201154306561", "event_type": "OTP_REQUESTED", "phone": "+201154306561", "transaction_id": 21532}
+{"timestamp": "2026-07-17 22:22:51,880", "level": "INFO", "name": "inference", "message": "\n[bold cyan]Prediction Result:[/bold cyan]"}
+{"timestamp": "2026-07-17 22:22:51,882", "level": "INFO", "name": "inference", "message": "\n[bold cyan]TreeSHAP Explanation:[/bold cyan] (Top features driving this fraud score)"}
+{"timestamp": "2026-07-17 22:22:51,885", "level": "INFO", "name": "inference", "message": "\n[bold yellow]\ud83d\udd12 [DEV LOG] OTP Generated & Sent to Twilio:[/bold yellow] [white]725831[/white]"}
+{"timestamp": "2026-07-17 22:22:51,887", "level": "INFO", "name": "inference", "message": "[bold orange3]\u23f3 [PENDING][/bold orange3] Transaction 21532 suspended. Waiting for user to enter OTP..."}
+{"timestamp": "2026-07-17 22:22:56,567", "level": "WARNING", "name": "fraud_pipeline", "message": "[bold red]\u274c OTP mismatch for tx=21532.[/bold red]", "event_type": "OTP_FAILED", "transaction_id": 21532, "reason": "MISMATCH"}
+{"timestamp": "2026-07-17 22:22:56,569", "level": "ERROR", "name": "inference", "message": "[bold red]Transaction permanently blocked.[/bold red]"}
