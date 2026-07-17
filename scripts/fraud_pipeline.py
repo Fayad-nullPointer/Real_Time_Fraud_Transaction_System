@@ -49,8 +49,8 @@ if str(SCRIPT_DIR) not in sys.path:
 from feature_engineering import FraudFeatureEngineer
 from models import FraudModelBundle, FraudPrediction
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("fraud_pipeline")
+from logger import get_logger
+logger = get_logger("fraud_pipeline")
 
 
 class FraudDetectionPipeline:
@@ -110,15 +110,20 @@ class FraudDetectionPipeline:
 
         if prediction.is_fraud:
             logger.warning(
-                "FRAUD FLAGGED tx=%s prob=%.3f scenario=%s (conf=%.3f)",
-                prediction.transaction_id, prediction.fraud_probability,
-                prediction.scenario_name, prediction.scenario_confidence or 0.0,
+                f"[bold red]🚨 FRAUD FLAGGED[/bold red] | TX: {prediction.transaction_id} | Prob: {prediction.fraud_probability:.3f} | Scenario: {prediction.scenario_name}",
+                extra={
+                    "event_type": "FRAUD_DETECTED",
+                    "transaction_id": prediction.transaction_id,
+                    "fraud_probability": prediction.fraud_probability,
+                    "scenario": prediction.scenario_name,
+                    "top_reasons": prediction.top_fraud_reasons,
+                }
             )
             
             # --- Architecture Step: Send WhatsApp OTP ---
             phone_number = tx.get("PHONE_NUMBER")
             if phone_number:
-                logger.info(f"Triggering Twilio WhatsApp OTP for phone number: {phone_number}")
+                logger.info(f"Triggering Twilio WhatsApp OTP for phone number: {phone_number}", extra={"event_type": "OTP_REQUESTED", "phone": phone_number})
                 try:
                     # Import here to avoid circular imports if any, or just use the global import
                     from twilio_notifier import WhatsAppNotifier
@@ -131,14 +136,24 @@ class FraudDetectionPipeline:
                     )
                     
                     if expected_otp:
-                        print(f"\n[DEV LOG] 🔒 OTP Generated: {expected_otp}")
-                        print(f"[PENDING] Transaction {tx.get('TRANSACTION_ID')} suspended. Waiting for user to enter OTP...")
+                        from rich.console import Console
+                        console = Console()
+                        console.print(f"\n[bold yellow]🔒 [DEV LOG] OTP Generated:[/bold yellow] [white]{expected_otp}[/white]")
+                        console.print(f"[bold orange3]⏳ [PENDING][/bold orange3] Transaction {tx.get('TRANSACTION_ID')} suspended. Waiting for user to enter OTP...")
+                        
                         user_input = input("Enter OTP from WhatsApp to approve transaction: ")
                         if user_input.strip() == expected_otp:
-                            print("✅ OTP MATCHED! Transaction Approved.")
+                            logger.info(
+                                "[bold green]✅ OTP MATCHED! Transaction Approved.[/bold green]", 
+                                extra={"event_type": "OTP_VERIFIED", "transaction_id": prediction.transaction_id, "status": "APPROVED"}
+                            )
                             prediction.is_fraud = False  # Overriding the fraud flag since user verified
                         else:
-                            print("❌ OTP INCORRECT! Transaction remains blocked.")
+                            logger.error(
+                                "[bold red]❌ OTP INCORRECT! Transaction remains blocked.[/bold red]",
+                                extra={"event_type": "OTP_FAILED", "transaction_id": prediction.transaction_id, "status": "BLOCKED"}
+                            )
+
                 except Exception as e:
                     logger.error(f"Failed to trigger WhatsApp notifier: {e}")
 
