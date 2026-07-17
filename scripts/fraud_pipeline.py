@@ -54,8 +54,8 @@ from explainability import FraudModelExplainer
 from feature_engineering import FEATURE_COLS
 from twilio_notifier import WhatsAppNotifier
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("fraud_pipeline")
+from logger import get_logger
+logger = get_logger("fraud_pipeline")
 
 
 class FraudDetectionPipeline:
@@ -159,9 +159,13 @@ class FraudDetectionPipeline:
 
         if prediction.is_fraud:
             logger.warning(
-                "FRAUD FLAGGED tx=%s prob=%.3f scenario=%s (conf=%.3f)",
-                prediction.transaction_id, prediction.fraud_probability,
-                prediction.scenario_name, prediction.scenario_confidence or 0.0,
+                f"[bold red]🚨 FRAUD FLAGGED[/bold red] | TX: {prediction.transaction_id} | Prob: {prediction.fraud_probability:.3f} | Scenario: {prediction.scenario_name}",
+                extra={
+                    "event_type": "FRAUD_DETECTED",
+                    "transaction_id": prediction.transaction_id,
+                    "fraud_probability": prediction.fraud_probability,
+                    "scenario": prediction.scenario_name,
+                }
             )
             self._send_fraud_alert(tx, prediction)
 
@@ -205,10 +209,15 @@ class FraudDetectionPipeline:
         phone_number = tx.get("PHONE_NUMBER") or tx.get("phone_number")
         if not phone_number:
             logger.warning(
-                "tx=%s flagged as fraud but no PHONE_NUMBER on the transaction "
-                "— skipping WhatsApp alert.", prediction.transaction_id,
+                f"[bold yellow]tx={prediction.transaction_id} flagged as fraud but no PHONE_NUMBER on the transaction — skipping WhatsApp alert.[/bold yellow]",
+                extra={"event_type": "OTP_SKIPPED", "transaction_id": prediction.transaction_id}
             )
             return None
+
+        logger.info(
+            f"Triggering Twilio WhatsApp OTP for phone number: {phone_number}",
+            extra={"event_type": "OTP_REQUESTED", "phone": phone_number, "transaction_id": prediction.transaction_id}
+        )
 
         otp = self.notifier.send_fraud_alert(
             to_phone_number=phone_number,
@@ -228,13 +237,22 @@ class FraudDetectionPipeline:
         expired, or never flagged)."""
         expected = self._pending_otps.get(transaction_id)
         if expected is None:
-            logger.warning("No pending OTP for tx=%s.", transaction_id)
+            logger.warning(
+                f"[bold yellow]No pending OTP for tx={transaction_id}.[/bold yellow]",
+                extra={"event_type": "OTP_FAILED", "transaction_id": transaction_id, "reason": "NO_PENDING_OTP"}
+            )
             return False
         if str(submitted_otp) != expected:
-            logger.warning("OTP mismatch for tx=%s.", transaction_id)
+            logger.warning(
+                f"[bold red]❌ OTP mismatch for tx={transaction_id}.[/bold red]",
+                extra={"event_type": "OTP_FAILED", "transaction_id": transaction_id, "reason": "MISMATCH"}
+            )
             return False
         del self._pending_otps[transaction_id]
-        logger.info("OTP confirmed for tx=%s.", transaction_id)
+        logger.info(
+            f"[bold green]✅ OTP confirmed for tx={transaction_id}.[/bold green]",
+            extra={"event_type": "OTP_VERIFIED", "transaction_id": transaction_id, "status": "APPROVED"}
+        )
         return True
 
     # ------------------------------------------------------------------ #
