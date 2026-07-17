@@ -167,6 +167,9 @@ class FraudDetectionPipeline:
                 f"[bold red]🚨 FRAUD FLAGGED[/bold red] | TX: {prediction.transaction_id} | Prob: {prediction.fraud_probability:.3f} | Scenario: {prediction.scenario_name}",
                 extra={
                     "event_type": "FRAUD_DETECTED",
+                    "customer_id": tx.get("CUSTOMER_ID"),
+                    "terminal_id": tx.get("TERMINAL_ID"),
+                    "amount": tx.get("TX_AMOUNT"),
                     "transaction_id": prediction.transaction_id,
                     "fraud_probability": prediction.fraud_probability,
                     "scenario": prediction.scenario_name,
