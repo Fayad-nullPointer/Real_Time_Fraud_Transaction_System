@@ -28,7 +28,6 @@ Two usage modes
 
 from __future__ import annotations
 
-import logging
 import pickle
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -38,8 +37,6 @@ from typing import Deque, Dict, Optional
 import numpy as np
 import pandas as pd
 from scipy.spatial import KDTree
-
-logger = logging.getLogger("feature_engineering")
 
 NIGHT_HOURS = {0, 1, 2, 3, 4}
 SMALL_TX = 10.0
@@ -75,6 +72,9 @@ FEATURE_COLS = [
     "mean_nb_tx_per_day",
     "nb_terminals",
     "day_of_week",
+    "terminal_tx_count_1h",
+    "terminal_tx_count_4h",
+    "terminal_distinct_customers_1h",
 ]
 
 
@@ -83,6 +83,12 @@ class _CustomerState:
     """Rolling, per-customer realtime state used for lag / velocity features."""
     last_amounts: Deque[float] = field(default_factory=lambda: deque(maxlen=3))
     recent_tx_times: Deque[pd.Timestamp] = field(default_factory=lambda: deque(maxlen=2000))
+
+@dataclass
+class _TerminalState:
+    """Rolling, per-terminal realtime state used for terminal velocity features."""
+    recent_tx_times: Deque[pd.Timestamp] = field(default_factory=lambda: deque(maxlen=2000))
+    recent_customers: Deque[int] = field(default_factory=lambda: deque(maxlen=2000))
 
 
 class FraudFeatureEngineer:
@@ -107,6 +113,9 @@ class FraudFeatureEngineer:
 
         # realtime per-customer state (lags / velocity)
         self._customer_state: Dict[int, _CustomerState] = defaultdict(_CustomerState)
+
+        # realtime per-terminal state
+        self._terminal_state: Dict[int, _TerminalState] = defaultdict(_TerminalState)
 
         self.is_fitted = False
 
@@ -149,7 +158,7 @@ class FraudFeatureEngineer:
         train_mask = tx["TX_DAY"] < TRAIN_DAYS
         self.peer_mean_lookup_ = (
             tx.loc[train_mask].assign(spending_tier=tx_tier[train_mask])
-            .groupby("spending_tier")["TX_AMOUNT"].mean()
+            .groupby("spending_tier", observed=False)["TX_AMOUNT"].mean()
         )
 
         # ---- daily terminal fraud aggregation (basis for rolling rates) --
@@ -313,6 +322,22 @@ class FraudFeatureEngineer:
         df = df_t.reset_index()
         df["night_velocity"] = (df["is_night"] * df["tx_count_1h"]).astype("int16")
 
+        # terminal velocity features
+        df = df.sort_values(["TERMINAL_ID", "TX_DATETIME"]).reset_index(drop=True)
+        df_t = df.set_index("TX_DATETIME")
+        df_t["terminal_tx_count_1h"] = (
+            df_t.groupby("TERMINAL_ID")["TX_AMOUNT"].transform(lambda x: x.rolling("1h", closed="left").count())
+        ).fillna(0).astype("int16")
+        df_t["terminal_tx_count_4h"] = (
+            df_t.groupby("TERMINAL_ID")["TX_AMOUNT"].transform(lambda x: x.rolling("4h", closed="left").count())
+        ).fillna(0).astype("int16")
+        df_t["terminal_distinct_customers_1h"] = (
+             df_t.groupby("TERMINAL_ID")["CUSTOMER_ID"].transform(
+                 lambda x: x.rolling("1h", closed="left").apply(lambda s: len(np.unique(s)), raw=True)
+             )
+        ).fillna(0).astype("int16")
+        df = df_t.reset_index()
+
         # terminal fraud rates (fitted lookups already built via fit())
         daily = self.daily_terminal_stats_
         df = df.merge(daily, on=["TERMINAL_ID", "TX_DAY"], how="left")
@@ -437,6 +462,15 @@ class FraudFeatureEngineer:
             "terminal_fraud_rate_28d": 0.0, "night_fraud_rate": 0.0, "neigh_fraud_rate": 0.0,
         })
 
+        t_state = self._terminal_state[term_id]
+        terminal_tx_count_1h = sum(1 for t in t_state.recent_tx_times if ts - t < pd.Timedelta(hours=1))
+        terminal_tx_count_4h = sum(1 for t in t_state.recent_tx_times if ts - t < pd.Timedelta(hours=4))
+        term_customers_1h = set(
+            c for t, c in zip(t_state.recent_tx_times, t_state.recent_customers)
+            if ts - t < pd.Timedelta(hours=1)
+        )
+        terminal_distinct_customers_1h = len(term_customers_1h)
+
         row = {
             "TX_AMOUNT": amount,
             "hour": hour,
@@ -463,6 +497,9 @@ class FraudFeatureEngineer:
             "mean_nb_tx_per_day": cust["mean_nb_tx_per_day"],
             "nb_terminals": cust["nb_terminals"],
             "day_of_week": day_of_week,
+            "terminal_tx_count_1h": terminal_tx_count_1h,
+            "terminal_tx_count_4h": terminal_tx_count_4h,
+            "terminal_distinct_customers_1h": terminal_distinct_customers_1h,
         }
         return pd.DataFrame([row], columns=FEATURE_COLS)
 
@@ -471,6 +508,7 @@ class FraudFeatureEngineer:
         Call this once you've decided the transaction is genuinely processed
         (so replay / re-scoring of the same event doesn't double-count)."""
         cust_id = tx["CUSTOMER_ID"]
+        term_id = tx["TERMINAL_ID"]
         ts = pd.Timestamp(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
         state = self._customer_state[cust_id]
@@ -481,162 +519,12 @@ class FraudFeatureEngineer:
         while state.recent_tx_times and state.recent_tx_times[0] < cutoff:
             state.recent_tx_times.popleft()
 
-    # ------------------------------------------------------------------ #
-    # Warm start — seed a known customer's realtime state from real history
-    # ------------------------------------------------------------------ #
-    def warm_start_customer(self, customer_id, history_df: Optional[pd.DataFrame]) -> bool:
-        """
-        Seed this customer's realtime lag/velocity state from their ACTUAL
-        transaction history (e.g. pulled from a transactions table/DB),
-        instead of letting the first `transform()` call cold-start them with
-        profile means and zero velocity.
-
-        This matters because in a real system a "new to this process"
-        customer is very often NOT a new customer — a service restart, a
-        new pod spinning up, or a request routed to a different replica all
-        reset in-memory state, but the customer's real history still exists
-        upstream. Without warm start, that customer's lag/velocity features
-        (and therefore fraud score) would be silently wrong for their first
-        transaction after every such event. Warm start closes that gap.
-
-        Parameters
-        ----------
-        customer_id : the CUSTOMER_ID to warm up. Must be a known customer
-            (present in the fitted customer profiles) — unknown customers
-            raise `KeyError`, exactly like `transform()` does, so a bad
-            customer_id fails loudly and immediately rather than silently
-            no-oping.
-        history_df : that customer's past transactions, with at least
-            TX_DATETIME and TX_AMOUNT columns, in ANY order (this method
-            sorts them chronologically itself). Pass as much or as little
-            history as you have available — only the most recent rows
-            actually matter (last 3 for lag features, last 2000 timestamps
-            for the velocity windows), so over-supplying history is always
-            safe and never expensive.
-
-        Returns
-        -------
-        True  — state was seeded from at least one valid historical row.
-        False — `history_df` was empty/None/had no valid rows for this
-                 customer, so their state was left untouched. This is a
-                 deliberate no-op, not a fault: the next real transaction
-                 will simply cold-start as before.
-
-        Idempotent: each call fully REPLACES this customer's buffered state
-        rather than appending to it, so re-warm-starting the same customer
-        (e.g. after a retry) never double-counts history.
-        """
-        if not self.is_fitted:
-            raise RuntimeError("Feature engineer is not fitted / loaded.")
-        if customer_id not in self.customer_profiles_.index:
-            raise KeyError(f"Unknown CUSTOMER_ID {customer_id}: no profile on file.")
-
-        if history_df is None or history_df.empty:
-            logger.info(
-                "warm_start_customer(%s): no history rows supplied — leaving "
-                "cold start in place.", customer_id,
-            )
-            return False
-
-        required = {"TX_DATETIME", "TX_AMOUNT"}
-        missing = required - set(history_df.columns)
-        if missing:
-            raise ValueError(f"history_df is missing required column(s): {sorted(missing)}")
-
-        h = history_df.copy()
-        h["TX_DATETIME"] = pd.to_datetime(h["TX_DATETIME"], errors="coerce")
-        h["TX_AMOUNT"] = pd.to_numeric(h["TX_AMOUNT"], errors="coerce")
-        h = h.dropna(subset=["TX_DATETIME", "TX_AMOUNT"]).sort_values("TX_DATETIME")
-        if h.empty:
-            logger.info(
-                "warm_start_customer(%s): history had no valid rows after "
-                "cleaning — leaving cold start in place.", customer_id,
-            )
-            return False
-
-        fresh_state = _CustomerState()
-        for amt in h["TX_AMOUNT"].tail(fresh_state.last_amounts.maxlen):
-            fresh_state.last_amounts.append(float(amt))
-        for ts in h["TX_DATETIME"].tail(fresh_state.recent_tx_times.maxlen):
-            fresh_state.recent_tx_times.append(pd.Timestamp(ts))
-
-        # replace (not merge) so repeated warm starts stay idempotent
-        self._customer_state[customer_id] = fresh_state
-        logger.info(
-            "warm_start_customer(%s): seeded from %d historical row(s) "
-            "(last_amounts=%d, recent_tx_times=%d).",
-            customer_id, len(h), len(fresh_state.last_amounts), len(fresh_state.recent_tx_times),
-        )
-        return True
-
-    def warm_start_from_history(
-        self, history_df: pd.DataFrame, *, customer_id_col: str = "CUSTOMER_ID"
-    ) -> Dict[str, list]:
-        """
-        Bulk version of `warm_start_customer` — call once at process startup
-        with a recent slice of the transactions table (e.g. "everything from
-        the last few hours/days, all customers") so every returning
-        customer's realtime state is already warm before the first live
-        transaction is scored. This is the production-realistic pattern:
-        real systems restore in-memory state from durable history on
-        startup rather than trusting a cold cache.
-
-        Robust by design: a bulk warm start must never fail because of a
-        handful of bad or unknown rows — those are skipped and reported,
-        never raised.
-
-        Parameters
-        ----------
-        history_df : transactions for potentially many customers, with at
-            least CUSTOMER_ID (or `customer_id_col`), TX_DATETIME, TX_AMOUNT.
-        customer_id_col : column name to group by (default "CUSTOMER_ID").
-
-        Returns
-        -------
-        {"warmed": [...], "skipped_unknown": [...], "skipped_empty": [...],
-         "skipped_error": [...]}
-        - warmed          : customers successfully seeded.
-        - skipped_unknown : customer_ids not in the fitted profiles.
-        - skipped_empty   : known customers with no usable history rows.
-        - skipped_error   : known customers whose rows raised an unexpected
-                             error while warming (logged, not raised).
-        """
-        report = {"warmed": [], "skipped_unknown": [], "skipped_empty": [], "skipped_error": []}
-        if history_df is None or history_df.empty:
-            logger.warning("warm_start_from_history: received an empty history_df — nothing to warm.")
-            return report
-        if customer_id_col not in history_df.columns:
-            raise ValueError(f"history_df is missing the customer id column '{customer_id_col}'.")
-
-        for cust_id, group in history_df.groupby(customer_id_col):
-            if cust_id not in self.customer_profiles_.index:
-                report["skipped_unknown"].append(cust_id)
-                continue
-            try:
-                warmed = self.warm_start_customer(cust_id, group)
-                report["warmed" if warmed else "skipped_empty"].append(cust_id)
-            except Exception:
-                logger.exception(
-                    "warm_start_from_history: failed to warm CUSTOMER_ID=%s — "
-                    "skipping this customer, continuing the rest of the batch.",
-                    cust_id,
-                )
-                report["skipped_error"].append(cust_id)
-
-        logger.info(
-            "warm_start_from_history: warmed=%d skipped_unknown=%d skipped_empty=%d skipped_error=%d",
-            len(report["warmed"]), len(report["skipped_unknown"]),
-            len(report["skipped_empty"]), len(report["skipped_error"]),
-        )
-        return report
-
-    def is_warm(self, customer_id) -> bool:
-        """True if this customer already has buffered realtime state, either
-        from real scoring earlier in this process or from a warm start.
-        Handy for debugging/monitoring ("is this customer's score based on
-        real history, or did they just cold-start?")."""
-        state = self._customer_state.get(customer_id)
-        return bool(state and len(state.last_amounts) > 0)
+        t_state = self._terminal_state[term_id]
+        t_state.recent_tx_times.append(ts)
+        t_state.recent_customers.append(cust_id)
+        while t_state.recent_tx_times and t_state.recent_tx_times[0] < cutoff:
+            t_state.recent_tx_times.popleft()
+            t_state.recent_customers.popleft()
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -649,8 +537,28 @@ class FraudFeatureEngineer:
 
     @classmethod
     def load(cls, path: str | Path) -> "FraudFeatureEngineer":
-        with open(path, "rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            raise TypeError(f"{path} does not contain a {cls.__name__}")
-        return obj
+        path = Path(path)
+        try:
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
+            if not isinstance(obj, cls):
+                raise TypeError(f"{path} does not contain a {cls.__name__}")
+            return obj
+        except Exception as exc:
+            # pandas categorical serialization can break across versions.
+            # Fall back to rebuilding the feature engineer from the packaged CSVs.
+            fallback_dir = path.parent.parent if path.parent.name == "models" else path.parent
+            data_dir = fallback_dir / "full dataset with brief"
+            if not data_dir.exists():
+                raise RuntimeError(
+                    f"Could not load feature engineer from {path} and no fallback data directory was found."
+                ) from exc
+
+            import pandas as pd
+
+            customer_df = pd.read_csv(data_dir / "customer_profiles.csv")
+            terminal_df = pd.read_csv(data_dir / "terminal_profiles.csv")
+            tx_df = pd.read_csv(data_dir / "synthetic_fraud_transactions.csv")
+            tx_df["TX_DATETIME"] = pd.to_datetime(tx_df["TX_DATETIME"])
+
+            return cls().fit(customer_df, terminal_df, tx_df)

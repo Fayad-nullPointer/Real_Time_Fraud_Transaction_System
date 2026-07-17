@@ -52,6 +52,7 @@ from feature_engineering import FraudFeatureEngineer
 from models import FraudModelBundle, FraudPrediction
 from explainability import FraudModelExplainer
 from feature_engineering import FEATURE_COLS
+from twilio_notifier import WhatsAppNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("fraud_pipeline")
@@ -72,18 +73,35 @@ class FraudDetectionPipeline:
         feature_engineer: FraudFeatureEngineer,
         model_bundle: FraudModelBundle,
         explainer: Optional[FraudModelExplainer] = None,
+        notifier: Optional[WhatsAppNotifier] = None,
     ):
         self.feature_engineer = feature_engineer
         self.model_bundle = model_bundle
         self.explainer = explainer
+        self.notifier = notifier
+        # transaction_id -> OTP issued for that flagged transaction, so a
+        # later confirm_transaction_otp() call has something to check against.
+        self._pending_otps: Dict[object, str] = {}
 
     # ------------------------------------------------------------------ #
     @classmethod
     def from_artifacts(
-        cls, artifacts_dir: str | Path = "models", *, load_explainer: bool = True
+        cls, artifacts_dir: str | Path = "models", *, load_explainer: bool = True,
+        send_whatsapp_alerts: bool = True,
     ) -> "FraudDetectionPipeline":
         """Load the fitted feature engineer + both trained models from disk,
-        and (by default) build a `FraudModelExplainer` on top of them."""
+        and (by default) build a `FraudModelExplainer` on top of them.
+
+        send_whatsapp_alerts : if True (default), also constructs a
+            `WhatsAppNotifier` so every transaction flagged as fraud
+            automatically triggers a WhatsApp OTP alert (see
+            `process_transaction`). The notifier reads
+            TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_NUMBER
+            from your `.env` file; if those aren't set, alert-sending is
+            silently skipped per-transaction rather than raising here. Set
+            False to disable WhatsApp alerts entirely (e.g. in tests, or a
+            batch/offline context where nobody should be paged).
+        """
         artifacts_dir = Path(artifacts_dir)
         fe = FraudFeatureEngineer.load(artifacts_dir / "feature_engineer.pkl")
         bundle = FraudModelBundle.load(artifacts_dir)
@@ -97,7 +115,15 @@ class FraudDetectionPipeline:
             except ImportError as exc:
                 logger.warning("Explainability disabled: %s", exc)
 
-        return cls(fe, bundle, explainer)
+        notifier = WhatsAppNotifier() if send_whatsapp_alerts else None
+        if notifier is not None and notifier.client is None:
+            logger.warning(
+                "WhatsApp alerts requested but Twilio credentials are missing — "
+                "fraud alerts will be logged but not sent. Set TWILIO_ACCOUNT_SID "
+                "and TWILIO_AUTH_TOKEN in your .env to enable them."
+            )
+
+        return cls(fe, bundle, explainer, notifier)
 
     # ------------------------------------------------------------------ #
     def process_transaction(
@@ -137,6 +163,7 @@ class FraudDetectionPipeline:
                 prediction.transaction_id, prediction.fraud_probability,
                 prediction.scenario_name, prediction.scenario_confidence or 0.0,
             )
+            self._send_fraud_alert(tx, prediction)
 
         if not explain:
             return prediction
@@ -157,6 +184,58 @@ class FraudDetectionPipeline:
         passed in chronological order per customer so lag/velocity features
         stay correct — exactly like the notebooks' sort-then-groupby logic."""
         return [self.process_transaction(tx, update_state=update_state) for tx in transactions]
+
+    # ------------------------------------------------------------------ #
+    # WhatsApp fraud alerts (Twilio)
+    # ------------------------------------------------------------------ #
+    def _send_fraud_alert(self, tx: dict, prediction: FraudPrediction) -> Optional[str]:
+        """Send a WhatsApp OTP alert for a transaction that was just flagged
+        as fraud, and remember the OTP so `confirm_transaction_otp` can check
+        a customer's reply against it later.
+
+        Looks for the customer's phone number on the transaction dict itself
+        (`PHONE_NUMBER` or `phone_number`), since the fitted customer/terminal
+        profiles don't carry contact info. Never raises: a missing phone
+        number, missing Twilio credentials, or a Twilio API error is logged
+        and skipped so a notification problem never blocks fraud scoring.
+        """
+        if self.notifier is None:
+            return None
+
+        phone_number = tx.get("PHONE_NUMBER") or tx.get("phone_number")
+        if not phone_number:
+            logger.warning(
+                "tx=%s flagged as fraud but no PHONE_NUMBER on the transaction "
+                "— skipping WhatsApp alert.", prediction.transaction_id,
+            )
+            return None
+
+        otp = self.notifier.send_fraud_alert(
+            to_phone_number=phone_number,
+            transaction_id=str(prediction.transaction_id),
+            tx_amount=tx.get("TX_AMOUNT"),
+            terminal_id=str(tx.get("TERMINAL_ID")),
+        )
+        if otp is not None:
+            self._pending_otps[prediction.transaction_id] = otp
+        return otp
+
+    def confirm_transaction_otp(self, transaction_id, submitted_otp: str) -> bool:
+        """Check a customer-submitted OTP against the one sent for
+        `transaction_id`'s fraud alert. Returns True and clears the pending
+        OTP on a match (one-time use); returns False if it doesn't match or
+        no alert is pending for this transaction (e.g. already confirmed,
+        expired, or never flagged)."""
+        expected = self._pending_otps.get(transaction_id)
+        if expected is None:
+            logger.warning("No pending OTP for tx=%s.", transaction_id)
+            return False
+        if str(submitted_otp) != expected:
+            logger.warning("OTP mismatch for tx=%s.", transaction_id)
+            return False
+        del self._pending_otps[transaction_id]
+        logger.info("OTP confirmed for tx=%s.", transaction_id)
+        return True
 
     # ------------------------------------------------------------------ #
     # Warm start — see FraudFeatureEngineer for the full docstrings.
@@ -224,10 +303,14 @@ if __name__ == "__main__":
                               '"TX_AMOUNT":189.5}\'')
     parser.add_argument("--explain", action="store_true",
                          help="Also print per-feature SHAP contributions.")
+    parser.add_argument("--no-whatsapp-alerts", action="store_true",
+                         help="Don't send a WhatsApp OTP alert even if the transaction is flagged as fraud.")
     args = parser.parse_args()
 
     tx = json.loads(args.transaction_json)
-    pipeline = FraudDetectionPipeline.from_artifacts(args.artifacts_dir)
+    pipeline = FraudDetectionPipeline.from_artifacts(
+        args.artifacts_dir, send_whatsapp_alerts=not args.no_whatsapp_alerts
+    )
 
     if args.explain:
         result, explanation = pipeline.process_transaction(tx, explain=True)
