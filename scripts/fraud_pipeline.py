@@ -114,6 +114,34 @@ class FraudDetectionPipeline:
                 prediction.transaction_id, prediction.fraud_probability,
                 prediction.scenario_name, prediction.scenario_confidence or 0.0,
             )
+            
+            # --- Architecture Step: Send WhatsApp OTP ---
+            phone_number = tx.get("PHONE_NUMBER")
+            if phone_number:
+                logger.info(f"Triggering Twilio WhatsApp OTP for phone number: {phone_number}")
+                try:
+                    # Import here to avoid circular imports if any, or just use the global import
+                    from twilio_notifier import WhatsAppNotifier
+                    notifier = WhatsAppNotifier()
+                    expected_otp = notifier.send_fraud_alert(
+                        to_phone_number=phone_number,
+                        transaction_id=str(tx.get("TRANSACTION_ID", "UNKNOWN")),
+                        tx_amount=float(tx.get("TX_AMOUNT", 0.0)),
+                        terminal_id=str(tx.get("TERMINAL_ID", "UNKNOWN"))
+                    )
+                    
+                    if expected_otp:
+                        print(f"\n[DEV LOG] 🔒 OTP Generated: {expected_otp}")
+                        print(f"[PENDING] Transaction {tx.get('TRANSACTION_ID')} suspended. Waiting for user to enter OTP...")
+                        user_input = input("Enter OTP from WhatsApp to approve transaction: ")
+                        if user_input.strip() == expected_otp:
+                            print("✅ OTP MATCHED! Transaction Approved.")
+                            prediction.is_fraud = False  # Overriding the fraud flag since user verified
+                        else:
+                            print("❌ OTP INCORRECT! Transaction remains blocked.")
+                except Exception as e:
+                    logger.error(f"Failed to trigger WhatsApp notifier: {e}")
+
         return prediction
 
     def process_batch(self, transactions: Iterable[dict], *, update_state: bool = True) -> List[FraudPrediction]:
