@@ -1,0 +1,673 @@
+/* ============================================================
+   FraudShield – Admin Dashboard JavaScript
+   Connects to FastAPI backend via REST + WebSocket
+   ============================================================ */
+
+const API = "http://localhost:8008";
+const WS  = "ws://localhost:8008/api/dashboard/ws";
+
+const MAX_LIVE_ROWS   = 50;
+const MAX_FEED_EVENTS = 80;
+const MAX_ALERTS      = 30;
+
+let volumeChart, fraudTrendChart, scenariosChart, reasonsChart;
+let fraudMap, fraudMapLayer;
+let metricsCache = {};
+let activeTab = "overview";
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", async () => {
+  startClock();
+  initCharts();
+  initFraudMap();
+  connectWebSocket();
+  await fetchAll();
+  setInterval(fetchAll, 30_000);
+
+  document.getElementById("btn-refresh").addEventListener("click", fetchAll);
+  setupNavTabs();
+  setupLogFilters();
+});
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+function startClock() {
+  const el = document.getElementById("clock");
+  const tick = () => { el.textContent = new Date().toLocaleTimeString(); };
+  tick(); setInterval(tick, 1000);
+}
+
+// ── Nav Tab Routing ───────────────────────────────────────────────────────────
+function setupNavTabs() {
+  document.querySelectorAll(".nav-item").forEach(link => {
+    link.addEventListener("click", e => {
+      document.querySelectorAll(".nav-item").forEach(l => l.classList.remove("active"));
+      link.classList.add("active");
+    });
+  });
+}
+
+// ── Fetch all data ────────────────────────────────────────────────────────────
+async function fetchAll() {
+  try {
+    const [metrics, txList, system] = await Promise.all([
+      apiFetch("/api/dashboard/metrics"),
+      apiFetch("/api/dashboard/transactions?limit=50"),
+      apiFetch("/api/dashboard/system"),
+    ]);
+    metricsCache = metrics;
+    updateKPIs(metrics);
+    updateCharts(metrics);
+    updateFunnel(metrics.otp_funnel);
+    renderFraudTable(txList.filter(t => t.is_fraud).slice(0, 12));
+    populateLiveTable(txList.slice(0, MAX_LIVE_ROWS));
+    updateSystemHealth(system);
+    document.getElementById("last-updated").textContent = "Last updated: " + new Date().toLocaleTimeString();
+
+    // Refresh fraud map data
+    refreshFraudMap();
+  } catch (e) {
+    console.error("fetchAll error:", e);
+  }
+}
+
+async function apiFetch(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(`HTTP ${r.status} for ${path}`);
+  return r.json();
+}
+
+// ── KPI Cards ─────────────────────────────────────────────────────────────────
+function updateKPIs(d) {
+  set("val-total",     d.total_transactions?.toLocaleString() ?? "—");
+  set("val-volume",    "$" + fmtMoney(d.transaction_volume));
+  set("val-fraud",     d.fraud_detected?.toLocaleString() ?? "—");
+  set("val-confirmed", d.confirmed_fraud?.toLocaleString() ?? "—");
+  set("val-legit",     d.legitimate?.toLocaleString() ?? "—");
+  set("val-fp",        d.false_positives_corrected?.toLocaleString() ?? "—");
+  set("val-rate",      (d.fraud_rate ?? 0).toFixed(2) + "%");
+  set("val-customers", d.active_customers?.toLocaleString() ?? "—");
+  set("val-terminals", d.active_terminals?.toLocaleString() ?? "—");
+}
+
+function fmtMoney(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
+  return (n ?? 0).toFixed(0);
+}
+
+// ── Charts (Responsive) ───────────────────────────────────────────────────────
+function initCharts() {
+  Chart.defaults.color = "#94a3b8";
+  Chart.defaults.borderColor = "rgba(255,255,255,0.06)";
+
+  const sharedLineOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: "rgba(10,13,20,0.95)",
+        borderColor: "rgba(255,255,255,0.1)",
+        borderWidth: 1,
+        padding: 10,
+        titleColor: "#f1f5f9",
+        bodyColor: "#94a3b8",
+      },
+    },
+    scales: {
+      x: {
+        grid: { color: "rgba(255,255,255,0.04)" },
+        ticks: { maxRotation: 0, font: { size: 11 } },
+      },
+      y: {
+        grid: { color: "rgba(255,255,255,0.04)" },
+        beginAtZero: true,
+        ticks: { font: { size: 11 } },
+      },
+    },
+    animation: { duration: 400 },
+  };
+
+  const sharedBarOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    indexAxis: "y",
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: "rgba(10,13,20,0.95)",
+        borderColor: "rgba(255,255,255,0.1)",
+        borderWidth: 1,
+        padding: 10,
+        titleColor: "#f1f5f9",
+        bodyColor: "#94a3b8",
+      },
+    },
+    scales: {
+      x: { grid: { color: "rgba(255,255,255,0.04)" }, beginAtZero: true, ticks: { font: { size: 11 } } },
+      y: { grid: { display: false }, ticks: { font: { size: 11 } } },
+    },
+    animation: { duration: 400 },
+  };
+
+  volumeChart = new Chart(document.getElementById("chart-volume"), {
+    type: "line",
+    data: { labels: [], datasets: [] },
+    options: JSON.parse(JSON.stringify(sharedLineOptions)),
+  });
+
+  fraudTrendChart = new Chart(document.getElementById("chart-fraud-trend"), {
+    type: "bar",
+    data: { labels: [], datasets: [] },
+    options: JSON.parse(JSON.stringify(sharedLineOptions)),
+  });
+
+  scenariosChart = new Chart(document.getElementById("chart-scenarios"), {
+    type: "bar",
+    data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+    options: JSON.parse(JSON.stringify(sharedBarOptions)),
+  });
+
+  reasonsChart = new Chart(document.getElementById("chart-reasons"), {
+    type: "bar",
+    data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+    options: JSON.parse(JSON.stringify(sharedBarOptions)),
+  });
+
+  // Redraw charts when the window is resized
+  window.addEventListener("resize", () => {
+    [volumeChart, fraudTrendChart, scenariosChart, reasonsChart].forEach(c => c?.resize());
+  });
+}
+
+function updateCharts(d) {
+  const hourly = d.hourly || [];
+  const labels = hourly.map(h => `${String(h.hour).padStart(2,"0")}:00`);
+
+  // Volume line
+  volumeChart.data.labels = labels;
+  volumeChart.data.datasets = [{
+    label: "Transactions",
+    data: hourly.map(h => h.tx_count),
+    borderColor: "#6366f1",
+    backgroundColor: "rgba(99,102,241,0.12)",
+    borderWidth: 2,
+    fill: true,
+    tension: 0.4,
+    pointRadius: 3,
+    pointBackgroundColor: "#6366f1",
+    pointHoverRadius: 5,
+  }];
+  volumeChart.update("none");
+
+  // Fraud trend bar
+  fraudTrendChart.data.labels = labels;
+  fraudTrendChart.data.datasets = [{
+    label: "Fraud Events",
+    data: hourly.map(h => h.fraud_count),
+    backgroundColor: hourly.map(h =>
+      h.fraud_count > 0
+        ? "rgba(239,68,68,0.7)"
+        : "rgba(239,68,68,0.15)"
+    ),
+    borderColor: "#ef4444",
+    borderWidth: 1,
+    borderRadius: 4,
+  }];
+  fraudTrendChart.options.type = "bar";
+  fraudTrendChart.update("none");
+
+  // Scenarios
+  const scenarios = d.scenarios || [];
+  const scenColors = ["#ef4444","#f59e0b","#8b5cf6","#06b6d4","#22c55e"];
+  scenariosChart.data.labels   = scenarios.map(s => s.scenario_name);
+  scenariosChart.data.datasets[0].data            = scenarios.map(s => s.cnt);
+  scenariosChart.data.datasets[0].backgroundColor = scenarios.map((_, i) => scenColors[i % scenColors.length]);
+  scenariosChart.data.datasets[0].borderRadius    = 4;
+  scenariosChart.update("none");
+
+  // Top reasons
+  const reasons = d.top_reasons || [];
+  const reaColors = ["#6366f1","#8b5cf6","#3b82f6","#06b6d4","#22c55e"];
+  reasonsChart.data.labels   = reasons.map(r => r.top_reason?.replace("num__","") ?? r.top_reason);
+  reasonsChart.data.datasets[0].data            = reasons.map(r => r.cnt);
+  reasonsChart.data.datasets[0].backgroundColor = reasons.map((_, i) => reaColors[i % reaColors.length]);
+  reasonsChart.data.datasets[0].borderRadius    = 4;
+  reasonsChart.update("none");
+}
+
+// ── OTP Funnel ────────────────────────────────────────────────────────────────
+function updateFunnel(f) {
+  if (!f) return;
+  set("f-predictions", f.fraud_predictions);
+  set("f-sent",        f.otp_sent);
+  set("f-verified",    f.otp_verified);
+  set("f-confirmed",   f.confirmed_fraud);
+
+  const max = f.fraud_predictions || 1;
+  const pct = v => Math.max(8, Math.round((v / max) * 100)) + "%";
+  document.querySelector("#funnel-predictions .funnel-bar").style.width = "100%";
+  document.querySelector("#funnel-sent      .funnel-bar").style.width = pct(f.otp_sent);
+  document.querySelector("#funnel-verified  .funnel-bar").style.width = pct(f.otp_verified);
+  document.querySelector("#funnel-confirmed .funnel-bar").style.width = pct(f.confirmed_fraud);
+}
+
+// ── Live Table ────────────────────────────────────────────────────────────────
+function populateLiveTable(txList) {
+  const tbody = document.getElementById("live-tbody");
+  tbody.innerHTML = "";
+  txList.forEach(tx => tbody.appendChild(buildLiveRow(tx, false)));
+}
+
+function prependLiveRow(tx) {
+  const tbody = document.getElementById("live-tbody");
+  const row = buildLiveRow(tx, true);
+  tbody.prepend(row);
+  while (tbody.children.length > MAX_LIVE_ROWS) tbody.removeChild(tbody.lastChild);
+}
+
+function buildLiveRow(tx, animate) {
+  const tr = document.createElement("tr");
+  if (animate) tr.classList.add("row-new");
+  const t = new Date(tx.tx_datetime || tx.timestamp);
+  tr.innerHTML = `
+    <td>${t.toLocaleTimeString()}</td>
+    <td>#${tx.customer_id}</td>
+    <td>${tx.terminal_id}</td>
+    <td>$${parseFloat(tx.tx_amount ?? tx.amount ?? 0).toFixed(2)}</td>
+    <td>${probBadge(tx.fraud_probability)}</td>
+    <td>${statusBadge(tx.status)}</td>
+  `;
+  return tr;
+}
+
+function probBadge(p) {
+  const pct = ((p ?? 0) * 100).toFixed(1);
+  const col = p > 0.7 ? "#ef4444" : p > 0.3 ? "#f59e0b" : "#22c55e";
+  return `<span style="color:${col};font-weight:600">${pct}%</span>`;
+}
+
+function statusBadge(s) {
+  const map = { APPROVED:"badge-approved", VERIFIED:"badge-verified", PENDING_OTP:"badge-otp", DECLINED:"badge-fraud", PENDING:"badge-pending" };
+  const label = { APPROVED:"✅ Approved", VERIFIED:"🔵 Verified", PENDING_OTP:"🟡 OTP Pending", DECLINED:"🔴 Fraud", PENDING:"⏳ Pending" };
+  return `<span class="badge ${map[s]||"badge-pending"}">${label[s]||s}</span>`;
+}
+
+// ── Event Feed ────────────────────────────────────────────────────────────────
+function pushEvent(ev) {
+  const feed = document.getElementById("event-feed");
+  const div  = document.createElement("div");
+  div.classList.add("event-item");
+
+  const t = new Date(ev.timestamp || Date.now()).toLocaleTimeString();
+  let icon = "📡", title = "Event", meta = "";
+
+  if (ev.event === "TRANSACTION") {
+    if (ev.is_fraud) {
+      icon = "🚨"; title = "Fraud Detected";
+      meta = `TX ${ev.transaction_id?.slice(0,8)} | ${ev.scenario_name || "—"} | ${((ev.fraud_probability ?? 0) * 100).toFixed(1)}%`;
+      pushAlert(`🚨 Fraud detected: TX ${ev.transaction_id?.slice(0,8)} — ${ev.scenario_name || ""}`, "danger");
+      if (ev.fraud_probability > 0.99) pushAlert("🚨 Fraud probability >99%", "danger");
+    } else {
+      icon = "✅"; title = "Transaction Approved";
+      meta = `TX ${ev.transaction_id?.slice(0,8)} — $${parseFloat(ev.amount ?? 0).toFixed(2)}`;
+    }
+  } else if (ev.event === "OTP_RESULT") {
+    if (ev.status === "VERIFIED") {
+      icon = "✅"; title = "OTP Verified";
+      meta = `TX ${ev.transaction_id?.slice(0,8)}`;
+      pushAlert("✅ OTP verified", "success");
+    } else {
+      const reason = ev.reason === "OTP_TIMEOUT" ? "OTP Timed Out — Auto Declined" : "OTP Failed — Fraud Confirmed";
+      icon = "🔴"; title = reason;
+      meta = `TX ${ev.transaction_id?.slice(0,8)}`;
+      pushAlert(`🔴 ${reason}: TX ${ev.transaction_id?.slice(0,8)}`, "danger");
+    }
+  }
+
+  div.innerHTML = `
+    <span class="event-time">${t}</span>
+    <span class="event-icon">${icon}</span>
+    <div class="event-body">
+      <div class="event-title">${title}</div>
+      ${meta ? `<div class="event-meta">${meta}</div>` : ""}
+    </div>`;
+
+  feed.prepend(div);
+  while (feed.children.length > MAX_FEED_EVENTS) feed.removeChild(feed.lastChild);
+}
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+let alertCount = 0;
+function pushAlert(text, type = "warning") {
+  const list = document.getElementById("alert-list");
+  const div  = document.createElement("div");
+  div.className = `alert-item alert-${type}`;
+  const t = new Date().toLocaleTimeString();
+  div.innerHTML = `<span class="alert-time">${t}</span><span class="alert-text">${text}</span>`;
+  list.prepend(div);
+  while (list.children.length > MAX_ALERTS) list.removeChild(list.lastChild);
+  alertCount++;
+  set("alert-count", alertCount);
+}
+
+// ── Fraud Table ───────────────────────────────────────────────────────────────
+function renderFraudTable(rows) {
+  const tbody = document.getElementById("fraud-tbody");
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.transaction_id?.slice(0,8)}…</td>
+      <td>${r.scenario_name || "—"}</td>
+      <td>${probBadge(r.fraud_probability)}</td>
+      <td>${statusBadge(r.status)}</td>
+    </tr>
+  `).join("");
+}
+
+// ── Fraud Map (fraud-only) ────────────────────────────────────────────────────
+function initFraudMap() {
+  fraudMap = L.map("fraud-map", { zoomControl: true }).setView([30.0, 31.2], 10);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap",
+    maxZoom: 19,
+  }).addTo(fraudMap);
+
+  // Custom dark-tinted tile using a filter overlay
+  const darkOverlay = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "",
+    maxZoom: 19,
+    opacity: 0,
+  }).addTo(fraudMap);
+
+  fraudMapLayer = L.layerGroup().addTo(fraudMap);
+
+  // Legend
+  const legend = L.control({ position: "bottomright" });
+  legend.onAdd = () => {
+    const div = L.DomUtil.create("div", "map-legend");
+    div.innerHTML = `
+      <div class="legend-item"><span class="legend-dot" style="background:#ef4444"></span> Fraud Terminal</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span> Customer Location</div>
+      <div class="legend-item"><span class="legend-dot legend-line"></span> Transaction Link</div>
+    `;
+    return div;
+  };
+  legend.addTo(fraudMap);
+}
+
+async function refreshFraudMap() {
+  try {
+    const data = await apiFetch("/api/dashboard/fraud-map");
+    fraudMapLayer.clearLayers();
+
+    if (!data.length) return;
+
+    // Track unique terminals involved in fraud
+    const terminalSeen = new Map();  // terminal_id -> {lat, lon, name, count, maxProb}
+
+    data.forEach(tx => {
+      // Customer marker (if lat/lon available)
+      if (tx.customer_lat && tx.customer_lon) {
+        const custMarker = L.circleMarker([tx.customer_lat, tx.customer_lon], {
+          radius: 5,
+          fillColor: "#f59e0b",
+          color: "#fff",
+          weight: 1,
+          fillOpacity: 0.8,
+        }).bindPopup(`
+          <b>👤 Customer #${tx.customer_id}</b><br>
+          Amount: $${parseFloat(tx.tx_amount).toFixed(2)}<br>
+          Scenario: ${tx.scenario_name || "—"}<br>
+          Prob: ${((tx.fraud_probability ?? 0) * 100).toFixed(1)}%<br>
+          Status: ${tx.status}
+        `);
+        fraudMapLayer.addLayer(custMarker);
+
+        // Draw line from customer to terminal
+        if (tx.terminal_lat && tx.terminal_lon) {
+          const line = L.polyline(
+            [[tx.customer_lat, tx.customer_lon], [tx.terminal_lat, tx.terminal_lon]],
+            {
+              color: tx.status === "DECLINED" ? "#ef4444" : "#f59e0b",
+              weight: 1.5,
+              opacity: 0.45,
+              dashArray: tx.status === "DECLINED" ? "4 4" : null,
+            }
+          );
+          fraudMapLayer.addLayer(line);
+        }
+      }
+
+      // Aggregate terminal data
+      if (tx.terminal_lat && tx.terminal_lon) {
+        if (!terminalSeen.has(tx.terminal_id)) {
+          terminalSeen.set(tx.terminal_id, {
+            lat: tx.terminal_lat, lon: tx.terminal_lon,
+            name: tx.terminal_name, count: 0, maxProb: 0,
+          });
+        }
+        const t = terminalSeen.get(tx.terminal_id);
+        t.count++;
+        t.maxProb = Math.max(t.maxProb, tx.fraud_probability ?? 0);
+      }
+    });
+
+    // Render terminal markers — sized by fraud count, colored by max probability
+    terminalSeen.forEach((info, tid) => {
+      const radius = Math.min(20, 8 + info.count * 1.5);
+      const fillColor = info.maxProb > 0.95 ? "#ef4444" : info.maxProb > 0.7 ? "#f97316" : "#f59e0b";
+      const marker = L.circleMarker([info.lat, info.lon], {
+        radius,
+        fillColor,
+        color: "#fff",
+        weight: 1.5,
+        fillOpacity: 0.85,
+      }).bindPopup(`
+        <b>🏧 ${info.name}</b><br>
+        Terminal ID: ${tid}<br>
+        Fraud Events: <strong>${info.count}</strong><br>
+        Max Probability: ${(info.maxProb * 100).toFixed(1)}%
+      `);
+      fraudMapLayer.addLayer(marker);
+    });
+
+    // Zoom to fit all markers
+    if (data.length) {
+      const bounds = [];
+      fraudMapLayer.eachLayer(l => {
+        if (l.getLatLng) bounds.push(l.getLatLng());
+        else if (l.getBounds) bounds.push(...l.getBounds().getSouthWest ? [l.getBounds().getSouthWest(), l.getBounds().getNorthEast()] : []);
+      });
+      if (bounds.length) {
+        fraudMap.fitBounds(L.latLngBounds(bounds).pad(0.15));
+      }
+    }
+  } catch (e) {
+    console.warn("fraud-map fetch failed:", e);
+  }
+}
+
+// Flash a terminal red when fraud arrives via WebSocket (visual feedback)
+function flashFraudTerminal(terminalId) {
+  fraudMapLayer.eachLayer(m => {
+    if (!m.getLatLng) return;
+    const popup = m._popup?._content || "";
+    if (popup.includes(`Terminal ID: ${terminalId}`)) {
+      const orig = m.options.fillColor;
+      m.setStyle({ fillColor: "#ff0000", fillOpacity: 1, radius: m.options.radius + 4 });
+      setTimeout(() => m.setStyle({ fillColor: orig, fillOpacity: 0.85, radius: m.options.radius - 4 }), 4000);
+    }
+  });
+}
+
+// ── Logs Tab ─────────────────────────────────────────────────────────────────
+let logsLoaded = false;
+let currentLogFilter = "";
+
+function setupLogFilters() {
+  document.querySelectorAll(".log-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".log-filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentLogFilter = btn.dataset.level;
+      loadLogs();
+    });
+  });
+
+  const searchBox = document.getElementById("log-search");
+  if (searchBox) {
+    searchBox.addEventListener("input", () => filterLogDisplay(searchBox.value));
+  }
+}
+
+async function loadLogs() {
+  const container = document.getElementById("log-entries");
+  if (!container) return;
+  container.innerHTML = `<div class="log-loading">Loading logs…</div>`;
+
+  try {
+    const url = currentLogFilter
+      ? `/api/dashboard/logs?limit=300&level=${currentLogFilter}`
+      : "/api/dashboard/logs?limit=300";
+    const data = await apiFetch(url);
+    renderLogs(data);
+    logsLoaded = true;
+  } catch {
+    container.innerHTML = `<div class="log-error">⚠ Could not load logs. Is the backend running?</div>`;
+  }
+}
+
+function renderLogs(entries) {
+  const container = document.getElementById("log-entries");
+  if (!container) return;
+
+  if (!entries.length) {
+    container.innerHTML = `<div class="log-empty">No log entries found.</div>`;
+    return;
+  }
+
+  set("log-count", entries.length);
+
+  container.innerHTML = entries.map(e => {
+    const level     = e.level?.toUpperCase() || "INFO";
+    const levelCls  = { WARNING: "log-warn", ERROR: "log-error-lvl", INFO: "log-info", DEBUG: "log-debug" }[level] || "log-info";
+    const eventType = e.event_type || "";
+    const eventBadge = eventType
+      ? `<span class="log-event-badge">${eventType}</span>`
+      : "";
+    const scenario = e.scenario ? `<span class="log-tag">${e.scenario}</span>` : "";
+    const prob     = e.fraud_probability != null
+      ? `<span class="log-tag log-prob">${(e.fraud_probability * 100).toFixed(1)}%</span>`
+      : "";
+    const topReasons = e.top_reasons
+      ? `<div class="log-reasons">Top reasons: ${Object.entries(e.top_reasons).map(([k,v]) => `<code>${k.replace("num__","")}: ${v}</code>`).join(", ")}</div>`
+      : "";
+    return `
+      <div class="log-entry ${levelCls}" data-search="${(e.message||"").toLowerCase()} ${eventType.toLowerCase()}">
+        <div class="log-meta">
+          <span class="log-time">${e.timestamp || ""}</span>
+          <span class="log-level ${levelCls}">${level}</span>
+          <span class="log-name">${e.name || ""}</span>
+          ${eventBadge}${scenario}${prob}
+        </div>
+        <div class="log-msg">${escHtml(e.message || "")}</div>
+        ${topReasons}
+      </div>`;
+  }).join("");
+}
+
+function filterLogDisplay(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll(".log-entry").forEach(el => {
+    const match = !q || (el.dataset.search || "").includes(q) || el.textContent.toLowerCase().includes(q);
+    el.style.display = match ? "" : "none";
+  });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ── System Health ─────────────────────────────────────────────────────────────
+function updateSystemHealth(s) {
+  if (!s) return;
+  set("sys-redis-hit", `Cache Hit: ${s.redis?.cache_hit_rate ?? "—"}%`);
+  set("sys-model-inf", `Inference: ${s.ml_model?.inference_ms ?? "—"} ms`);
+  set("sys-ws", `${s.websocket?.connected_clients ?? 0} clients`);
+  set("model-inf-display", `${s.ml_model?.inference_ms ?? "—"} ms`);
+
+  const r = s.resources || {};
+  setBar("bar-cpu",  r.cpu  ?? 0); set("val-cpu",  `${(r.cpu  ?? 0).toFixed(0)}%`);
+  setBar("bar-ram",  r.ram  ?? 0); set("val-ram",  `${(r.ram  ?? 0).toFixed(0)}%`);
+  setBar("bar-disk", r.disk ?? 0); set("val-disk", `${(r.disk ?? 0).toFixed(0)}%`);
+
+  if (r.ram > 80)  pushAlert("⚠ RAM usage above 80%", "warning");
+  if (r.disk > 85) pushAlert("⚠ Disk usage above 85%", "warning");
+}
+
+function setBar(id, pct) {
+  const el = document.getElementById(id);
+  if (el) el.style.width = Math.min(100, pct) + "%";
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWebSocket() {
+  const badge     = document.getElementById("ws-badge");
+  const badgeText = document.getElementById("ws-status-text");
+  const dot       = badge.querySelector(".dot");
+
+  let ws;
+  const connect = () => {
+    ws = new WebSocket(WS);
+
+    ws.onopen = () => {
+      dot.className  = "dot dot-green";
+      badgeText.textContent = "Live";
+    };
+
+    ws.onmessage = ({ data }) => {
+      const ev = JSON.parse(data);
+      pushEvent(ev);
+      if (ev.event === "TRANSACTION") {
+        prependLiveRow({
+          tx_datetime:       ev.timestamp,
+          customer_id:       ev.customer_id,
+          terminal_id:       ev.terminal_id,
+          tx_amount:         ev.amount,
+          fraud_probability: ev.fraud_probability,
+          status:            ev.status,
+          transaction_id:    ev.transaction_id,
+        });
+        if (ev.is_fraud) {
+          flashFraudTerminal(ev.terminal_id);
+          // Reload fraud map to include new point
+          setTimeout(refreshFraudMap, 1500);
+        }
+      }
+      if (ev.event === "OTP_RESULT") {
+        // Reload map when a fraud is confirmed or OTP times out
+        if (ev.status === "DECLINED") setTimeout(refreshFraudMap, 1500);
+      }
+    };
+
+    ws.onclose = () => {
+      dot.className  = "dot dot-yellow";
+      badgeText.textContent = "Reconnecting…";
+      setTimeout(connect, 3000);
+    };
+
+    ws.onerror = () => {
+      dot.className  = "dot dot-red";
+      badgeText.textContent = "Disconnected";
+    };
+  };
+
+  connect();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
