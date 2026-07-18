@@ -36,10 +36,11 @@ from jose import JWTError
 from backend.db.postgres import get_db_pool
 from backend.db.redis_client import get_redis
 from backend.core.ws_manager import ws_manager
-from backend.core.pipeline_wrapper import get_inference_time_ms
 from backend.core.geolocation import resolve_city_from_coords
 from backend.core.security import decode_token
 from backend.routers.auth import get_current_admin
+from backend.core.pipeline_wrapper import get_inference_time_ms, get_customer_state
+
 
 router = APIRouter(
     prefix="/api/dashboard",
@@ -91,6 +92,23 @@ def _parse_shap(value):
     except (TypeError, ValueError):
         return []
 
+
+
+@router.get("/customers/{customer_id}/state")
+async def customer_feature_state(customer_id: int, _: dict = Depends(get_current_admin)):
+    """
+    Live snapshot of the ML pipeline's internal state for this customer:
+    stored profile, spending tier, cold-start/warm status, and the
+    realtime lag/velocity buffers actually used at scoring time.
+
+    Distinct from GET /customers/{customer_id}, which reports business
+    stats computed from the Postgres transaction history — this endpoint
+    shows what the model itself currently "remembers".
+    """
+    try:
+        return get_customer_state(customer_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 @router.get("/metrics")
 async def get_metrics(_: dict = Depends(get_current_admin),):

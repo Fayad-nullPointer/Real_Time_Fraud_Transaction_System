@@ -15,6 +15,8 @@ import random
 import string
 from pathlib import Path
 from typing import Optional
+import pandas as pd
+from backend.db.postgres import get_db_pool
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -24,7 +26,6 @@ from scripts.fraud_pipeline import FraudDetectionPipeline
 _pipeline: Optional[FraudDetectionPipeline] = None
 _load_time_ms: float = 0.0
 _inference_time_ms: float = 0.0
-
 
 def load_pipeline() -> None:
     global _pipeline, _load_time_ms
@@ -38,6 +39,35 @@ def load_pipeline() -> None:
     _load_time_ms = (time.perf_counter() - t0) * 1000
     print(f"[pipeline] Loaded in {_load_time_ms:.1f} ms")
 
+
+async def warm_start_pipeline(hours: int = 48) -> dict:
+    """
+    Seed every returning customer's realtime lag/velocity buffers from
+    recent Postgres history right after the pipeline loads, so a fresh
+    deploy/restart doesn't score long-time customers as if they had no
+    history. Call once from the FastAPI lifespan, after load_pipeline().
+    """
+    pipeline = get_pipeline()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT customer_id AS "CUSTOMER_ID", terminal_id AS "TERMINAL_ID",
+                   tx_datetime AS "TX_DATETIME", tx_amount AS "TX_AMOUNT"
+            FROM transactions
+            WHERE tx_datetime >= NOW() - ($1 || ' hours')::interval
+            ORDER BY customer_id, tx_datetime
+            """,
+            str(hours),
+        )
+    if not rows:
+        print("[pipeline] No recent history found — nothing to warm start.")
+        return {"customers_warmed": 0, "customers_skipped": 0}
+
+    history_df = pd.DataFrame([dict(r) for r in rows])
+    stats = pipeline.warm_start_from_history(history_df)
+    print(f"[pipeline] Warm start complete: {stats}")
+    return stats
 
 def get_pipeline() -> FraudDetectionPipeline:
     if _pipeline is None:
@@ -121,3 +151,6 @@ def score_transaction(tx_dict: dict) -> dict:
         "top_reasons":      _rank_top_reasons(explanation),
         "explanation":      explanation,
     }
+
+def get_customer_state(customer_id) -> dict:
+    return get_pipeline().get_customer_debug_state(customer_id)

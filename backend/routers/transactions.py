@@ -16,15 +16,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.db.postgres import get_db_pool
-from backend.db.redis_client import (
-    count_customer_tx, count_terminal_distinct_customers,
-    count_terminal_tx, get_customer_lags,
-    get_redis, push_customer_lag, push_customer_tx_time,
-    push_terminal_event, store_otp, verify_otp,
-)
-from backend.core.pipeline_wrapper import generate_otp, score_transaction
+from backend.db.redis_client import get_redis, store_otp, verify_otp
 from backend.core.ws_manager import ws_manager
 from backend.routers.auth import get_current_customer
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+from logger import get_logger
+from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction
+
+logger = get_logger("transactions")
+
+OTP_TTL_SECONDS = 40   # was effectively 300s (Redis TTL) / 5min (frontend timer)
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
@@ -69,14 +72,6 @@ async def create_transaction(
     if not terminal:
         raise HTTPException(status_code=404, detail="Terminal not found or inactive.")
 
-    # Build raw velocity features from Redis
-    lags = await get_customer_lags(customer_id)
-    tx_count_1h = await count_customer_tx(customer_id, 3600)
-    tx_count_4h = await count_customer_tx(customer_id, 14400)
-    terminal_tx_1h = await count_terminal_tx(body.terminal_id, 3600)
-    terminal_tx_4h = await count_terminal_tx(body.terminal_id, 14400)
-    terminal_distinct_1h = await count_terminal_distinct_customers(body.terminal_id)
-
     # Build transaction dict for the ML pipeline
     tx_dict = {
         "TRANSACTION_ID": tx_id,
@@ -85,19 +80,14 @@ async def create_transaction(
         "TX_DATETIME":    now.strftime("%Y-%m-%d %H:%M:%S"),
         "TX_AMOUNT":      body.tx_amount,
         "PHONE_NUMBER":   customer["phone_number"],
-        # pre-computed velocity hints (pipeline will use its own state too)
-        "_redis_tx_count_1h":            tx_count_1h,
-        "_redis_tx_count_4h":            tx_count_4h,
-        "_redis_terminal_tx_count_1h":   terminal_tx_1h,
-        "_redis_terminal_tx_count_4h":   terminal_tx_4h,
-        "_redis_distinct_customers_1h":  terminal_distinct_1h,
-        "_redis_lags":                   lags,
     }
 
-    # Run ML inference (synchronous — runs in thread pool via FastAPI).
-    # Also returns "top_reasons": a compact, ranked list of the SHAP feature
-    # contributions behind this fraud_probability — see pipeline_wrapper.py.
-    result = score_transaction(tx_dict)
+    # Run ML inference (LightGBM + SHAP + a synchronous Twilio call on
+    # fraud) in a worker thread so it never blocks the event loop —
+    # other requests and the dashboard WebSocket keep flowing while this
+    # transaction scores.
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, score_transaction, tx_dict)
 
     result = {
         **result,
@@ -112,6 +102,11 @@ async def create_transaction(
 
     initial_status = "PENDING_OTP" if result["is_fraud"] else "APPROVED"
 
+    otp_expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
+        if result["is_fraud"] else None
+    )
+
     # Persist transaction to PostgreSQL (including its SHAP explanation, so
     # the dashboard can show "why" when an admin clicks into this
     # transaction later — see GET /api/dashboard/transactions/{id}).
@@ -121,8 +116,9 @@ async def create_transaction(
             INSERT INTO transactions (
                 transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
                 user_lat, user_lon, is_fraud, fraud_probability,
-                scenario_id, scenario_name, top_reason, status, shap_explanation
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                scenario_id, scenario_name, top_reason, status, shap_explanation,
+                otp_expires_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             """,
             tx_id, customer_id, body.terminal_id, body.tx_amount, now,
             body.lat, body.lon,
@@ -130,13 +126,8 @@ async def create_transaction(
             result["scenario_id"], result["scenario_name"],
             result["top_reason"], initial_status,
             json.dumps(result.get("top_reasons", [])),
+            otp_expires_at,
         )
-
-    # Update Redis velocity state (only for approved transactions)
-    if not result["is_fraud"]:
-        await push_customer_lag(customer_id, body.tx_amount)
-        await push_customer_tx_time(customer_id, tx_id, now.timestamp())
-        await push_terminal_event(body.terminal_id, customer_id, tx_id, now.timestamp())
 
     # Broadcast to dashboard WebSocket (top_reasons included so the live
     # event feed / logs view can show "why" without a follow-up fetch).
@@ -158,13 +149,14 @@ async def create_transaction(
     if result["is_fraud"]:
         # Generate and store OTP, Twilio alert is sent inside pipeline
         otp = generate_otp()
-        await store_otp(tx_id, otp)
+        await store_otp(tx_id, otp, ttl=OTP_TTL_SECONDS)
         return {
             "transaction_id": tx_id,
             "status": "PENDING_OTP",
             "message": "Suspicious activity detected. A verification code was sent to your WhatsApp.",
             "fraud_probability": result["fraud_probability"],
             "scenario": result["scenario_name"],
+            "otp_expires_in": OTP_TTL_SECONDS,
         }
 
     return {
@@ -205,12 +197,6 @@ async def verify_transaction(
             new_status, body.transaction_id,
         )
 
-    if otp_valid:
-        # Now update Redis velocity (transaction approved by user)
-        await push_customer_lag(customer_id, tx["tx_amount"])
-        await push_customer_tx_time(customer_id, body.transaction_id, tx["tx_datetime"].timestamp())
-        await push_terminal_event(tx["terminal_id"], customer_id, body.transaction_id, tx["tx_datetime"].timestamp())
-
     await ws_manager.broadcast({
         "event":          "OTP_RESULT",
         "transaction_id": body.transaction_id,
@@ -220,8 +206,218 @@ async def verify_transaction(
     })
 
     if otp_valid:
+        logger.info(
+            f"OTP verified for TX {body.transaction_id}.",
+            extra={"event_type": "OTP_VERIFIED", "customer_id": customer_id,
+                   "transaction_id": body.transaction_id, "status": "VERIFIED"},
+        )
+    else:
+        logger.warning(
+            f"OTP verification failed for TX {body.transaction_id} — incorrect code entered.",
+            extra={"event_type": "OTP_FAILED", "customer_id": customer_id,
+                   "transaction_id": body.transaction_id, "status": "DECLINED"},
+        )
+
+    if otp_valid:
         return {"status": "VERIFIED", "message": "Transaction verified and approved."}
     raise HTTPException(status_code=400, detail="Invalid or expired OTP. Transaction declined.")
+
+
+class OtpPendingRequest(BaseModel):
+    transaction_id: str
+
+@router.post("/otp-pending")
+async def mark_otp_pending(
+    body: OtpPendingRequest,
+    customer_id: int = Depends(get_current_customer),
+):
+    """
+    Called when the customer closes/cancels the OTP dialog WITHOUT the
+    verification window expiring. This is NOT a fraud signal — it never
+    touches the transaction's status. It only records that the customer
+    is still mid-verification, so the Logs tab / live feed can show
+    "customer pending" distinctly from an actual OTP timeout.
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        tx = await conn.fetchrow(
+            "SELECT customer_id, status FROM transactions WHERE transaction_id = $1",
+            body.transaction_id,
+        )
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    if tx["customer_id"] != customer_id:
+        raise HTTPException(status_code=403, detail="Not your transaction.")
+
+    if tx["status"] == "PENDING_OTP":
+        logger.info(
+            f"Customer paused OTP entry for TX {body.transaction_id} — still pending, not fraud.",
+            extra={
+                "event_type": "CUSTOMER_OTP_PENDING",
+                "customer_id": customer_id,
+                "transaction_id": body.transaction_id,
+                "status": "PENDING_OTP",
+            },
+        )
+        await ws_manager.broadcast({
+            "event": "OTP_PENDING",
+            "transaction_id": body.transaction_id,
+            "customer_id": customer_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    return {"status": tx["status"], "message": "Noted — you can resume verification any time before it times out."}
+
+
+class ResumeOTPRequest(BaseModel):
+    transaction_id: str
+
+
+@router.post("/resume")
+async def resume_otp(
+    body: ResumeOTPRequest,
+    customer_id: int = Depends(get_current_customer),
+):
+    """
+    Re-opens a still-PENDING_OTP transaction so the customer can enter the
+    code again after cancelling/closing the dialog earlier. Issues a fresh
+    OTP with a brand-new OTP_TTL_SECONDS window and re-sends it via
+    WhatsApp. Fails cleanly if the transaction was already resolved
+    (verified, declined, or already timed out by the server-side sweep).
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        tx = await conn.fetchrow(
+            """SELECT customer_id, terminal_id, tx_amount, status,
+                      fraud_probability, scenario_name
+               FROM transactions WHERE transaction_id = $1""",
+            body.transaction_id,
+        )
+        customer = await conn.fetchrow(
+            "SELECT phone_number FROM customers WHERE customer_id = $1", customer_id
+        )
+
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    if tx["customer_id"] != customer_id:
+        raise HTTPException(status_code=403, detail="Not your transaction.")
+    if tx["status"] != "PENDING_OTP":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Transaction is already resolved (status '{tx['status']}') — nothing to resume.",
+        )
+
+    otp = generate_otp()
+    await store_otp(body.transaction_id, otp, ttl=OTP_TTL_SECONDS)
+
+    new_expiry = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE transactions SET otp_expires_at = $2 WHERE transaction_id = $1",
+            body.transaction_id, new_expiry,
+        )
+
+    if customer:
+        try:
+            pipeline = get_pipeline()
+            if pipeline.notifier is not None:
+                pipeline.notifier.send_fraud_alert(
+                    to_phone_number=customer["phone_number"],
+                    transaction_id=body.transaction_id,
+                    tx_amount=float(tx["tx_amount"]),
+                    terminal_id=str(tx["terminal_id"]),
+                )
+        except RuntimeError:
+            pass  # pipeline not loaded — best-effort resend only
+
+    logger.info(
+        f"Customer resumed OTP verification for TX {body.transaction_id} — new {OTP_TTL_SECONDS}s window.",
+        extra={
+            "event_type": "CUSTOMER_OTP_RESUMED",
+            "customer_id": customer_id,
+            "transaction_id": body.transaction_id,
+            "status": "PENDING_OTP",
+        },
+    )
+
+    return {
+        "transaction_id": body.transaction_id,
+        "status": "PENDING_OTP",
+        "fraud_probability": float(tx["fraud_probability"] or 0.0),
+        "scenario": tx["scenario_name"],
+        "otp_expires_in": OTP_TTL_SECONDS,
+        "message": "A new verification code was sent to your WhatsApp.",
+    }
+
+_otp_sweeper_task: asyncio.Task | None = None
+
+
+async def _expire_stale_pending_otps() -> None:
+    """
+    The 40s OTP window is primarily enforced by the frontend countdown
+    (which calls /decline at zero), but that call can simply never
+    arrive. This sweep independently declines any PENDING_OTP row whose
+    otp_expires_at has already passed — same effect as /decline (status
+    -> DECLINED, is_fraud -> TRUE, OTP_NOT_ENTERED), same log entry, same
+    WS broadcast, so the dashboard/Logs tab can't tell the difference.
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            UPDATE transactions
+            SET status = 'DECLINED', is_fraud = TRUE, top_reason = 'OTP_NOT_ENTERED'
+            WHERE status = 'PENDING_OTP' AND otp_expires_at IS NOT NULL AND otp_expires_at < NOW()
+            RETURNING transaction_id, customer_id, shap_explanation
+            """
+        )
+
+    for row in rows:
+        existing_reasons = _parse_shap_reasons(row["shap_explanation"])
+        updated_reasons = [{"feature": "OTP_NOT_ENTERED", "shap_value": None, "type": "otp"}] + existing_reasons
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE transactions SET shap_explanation = $2 WHERE transaction_id = $1",
+                row["transaction_id"], json.dumps(updated_reasons),
+            )
+
+        r = get_redis()
+        await r.delete(f"otp:{row['transaction_id']}")
+
+        logger.warning(
+            f"[bold red][ALERT] OTP TIMEOUT — FRAUD CONFIRMED (server sweep)[/bold red] | TX: {row['transaction_id']}",
+            extra={"event_type": "OTP_TIMEOUT", "customer_id": row["customer_id"],
+                   "transaction_id": row["transaction_id"], "status": "DECLINED"},
+        )
+        await ws_manager.broadcast({
+            "event": "OTP_RESULT", "transaction_id": row["transaction_id"],
+            "customer_id": row["customer_id"], "status": "DECLINED", "is_fraud": True,
+            "reason": "OTP_TIMEOUT", "top_reason": "OTP_NOT_ENTERED",
+            "top_reasons": updated_reasons, "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+
+async def _otp_expiry_sweep_loop(interval_seconds: int = 5) -> None:
+    while True:
+        try:
+            await _expire_stale_pending_otps()
+        except Exception:
+            logger.exception("OTP expiry sweep failed — retrying next tick.")
+        await asyncio.sleep(interval_seconds)
+
+
+def start_otp_expiry_sweeper() -> None:
+    global _otp_sweeper_task
+    if _otp_sweeper_task is None:
+        _otp_sweeper_task = asyncio.create_task(_otp_expiry_sweep_loop())
+
+
+def stop_otp_expiry_sweeper() -> None:
+    global _otp_sweeper_task
+    if _otp_sweeper_task is not None:
+        _otp_sweeper_task.cancel()
+        _otp_sweeper_task = None
 
 
 @router.get("/history")
@@ -307,6 +503,17 @@ async def decline_transaction(
     # Delete any leftover OTP from Redis
     r = get_redis()
     await r.delete(f"otp:{body.transaction_id}")
+
+    logger.warning(
+        f"[bold red][ALERT] OTP TIMEOUT — FRAUD CONFIRMED[/bold red] | TX: {body.transaction_id} | "
+        f"Customer did not enter the OTP within the {OTP_TTL_SECONDS}s window.",
+        extra={
+            "event_type": "OTP_TIMEOUT",
+            "customer_id": customer_id,
+            "transaction_id": body.transaction_id,
+            "status": "DECLINED",
+        },
+    )
 
     await ws_manager.broadcast({
         "event":          "OTP_RESULT",

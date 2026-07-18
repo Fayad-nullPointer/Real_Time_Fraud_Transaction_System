@@ -450,3 +450,8 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
 .leaflet-container { background: #1a1d28; }
 .leaflet-popup-content-wrapper { background: rgba(15,18,28,0.95); color: #f1f5f9; border: 1px solid rgba(255,255,255,0.1); }
 .leaflet-popup-tip { background: rgba(15,18,28,0.95); }
+
+
+.tx-item.clickable { cursor: pointer; transition: all 0.2s; }
+.tx-item.clickable:hover { background: rgba(99,102,241,0.1); border-color: var(--accent); }
+.tx-pending-hint { font-size: 0.72rem; color: var(--warning); margin-top: 2px; }

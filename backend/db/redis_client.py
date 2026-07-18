@@ -104,10 +104,9 @@ async def count_terminal_distinct_customers(terminal_id: int) -> int:
 
 # ─── OTP helpers ─────────────────────────────────────────────────────────────
 
-async def store_otp(transaction_id: str, otp: str, ttl: int = 300) -> None:
+async def store_otp(transaction_id: str, otp: str, ttl: int = 40) -> None:
     r = get_redis()
     await r.setex(f"otp:{transaction_id}", ttl, otp)
-
 
 async def verify_otp(transaction_id: str, otp: str) -> bool:
     r = get_redis()

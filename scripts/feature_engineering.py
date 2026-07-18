@@ -103,6 +103,24 @@ FEATURE_COLS = [
 ]
 
 
+def _to_naive_ts(value) -> pd.Timestamp:
+    """
+    Normalize any incoming timestamp (naive string, tz-aware datetime from
+    asyncpg/Postgres, naive Timestamp from training CSVs, etc.) to a naive
+    pandas Timestamp in UTC wall-clock terms.
+
+    Without this, mixing tz-aware sources (e.g. warm-starting from a
+    TIMESTAMPTZ column) with tz-naive sources (e.g. live `TX_DATETIME`
+    strings built with `datetime.strftime`) crashes `ts - t` comparisons
+    with "Cannot subtract tz-naive and tz-aware datetime-like objects."
+    Every timestamp that enters `_customer_state` / `_terminal_state` must
+    go through here so all comparisons stay apples-to-apples.
+    """
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts
+
 @dataclass
 class _CustomerState:
     """Rolling, per-customer realtime state used for lag / velocity features."""
@@ -334,7 +352,7 @@ class FraudFeatureEngineer:
         if cust_hist.empty:
             return False
 
-        cust_hist["TX_DATETIME"] = pd.to_datetime(cust_hist["TX_DATETIME"])
+        cust_hist["TX_DATETIME"] = pd.to_datetime(cust_hist["TX_DATETIME"], utc=True).dt.tz_localize(None)
         cust_hist = cust_hist.sort_values("TX_DATETIME")
 
         for _, row in cust_hist.iterrows():
@@ -406,6 +424,65 @@ class FraudFeatureEngineer:
         """
         state = self._customer_state.get(customer_id)
         return bool(state and len(state.recent_tx_times) > 0)
+
+    def get_debug_state(self, customer_id) -> dict:
+        """
+        Snapshot of everything this feature engineer currently knows about
+        `customer_id` — for verifying that realtime lag/velocity state is
+        updating correctly (e.g. an admin "inspect model state" view).
+
+        NOTE: tx_count_1h/4h here are computed against wall-clock "now" for
+        display purposes. At actual scoring time they're computed against the
+        incoming transaction's own TX_DATETIME instead, so these numbers are
+        an approximation, not exactly what the next `transform()` call will see.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Feature engineer is not fitted / loaded.")
+
+        known = customer_id in self.customer_profiles_.index
+        out = {
+            "customer_id": customer_id,
+            "known_profile": known,
+            "is_cold_start": self.is_cold_start(customer_id),
+            "is_warm": self.is_warm(customer_id),
+            "profile": None,
+            "spending_tier": None,
+        }
+
+        if known:
+            cust = self.customer_profiles_.loc[customer_id]
+            out["profile"] = {
+                "mean_amount": float(cust["mean_amount"]),
+                "std_amount": float(cust["std_amount"]),
+                "mean_nb_tx_per_day": float(cust["mean_nb_tx_per_day"]),
+                "nb_terminals": float(cust["nb_terminals"]),
+                "x_customer_id": float(cust["x_customer_id"]),
+                "y_customer_id": float(cust["y_customer_id"]),
+            }
+            out["spending_tier"] = str(self.customer_tier_.get(customer_id))
+
+        state = self._customer_state.get(customer_id)
+        if state is not None:
+            now = pd.Timestamp.now()
+            recent = list(state.recent_tx_times)
+            out["realtime"] = {
+                "last_amounts_chronological": list(state.last_amounts),
+                "tx_count_1h_approx": sum(1 for t in recent if now - t < pd.Timedelta(hours=1)),
+                "tx_count_4h_approx": sum(1 for t in recent if now - t < pd.Timedelta(hours=4)),
+                "buffered_tx_times": [str(t) for t in recent],
+                "cold_start_running_n": state.running_n,
+                "cold_start_running_mean": state.running_mean if state.running_n else None,
+            }
+        else:
+            out["realtime"] = {
+                "last_amounts_chronological": [],
+                "tx_count_1h_approx": 0,
+                "tx_count_4h_approx": 0,
+                "buffered_tx_times": [],
+                "cold_start_running_n": 0,
+                "cold_start_running_mean": None,
+            }
+        return out
 
     # ------------------------------------------------------------------ #
     # Daily risk-stat maintenance (call nightly with newly confirmed labels)
@@ -644,7 +721,7 @@ class FraudFeatureEngineer:
             raise RuntimeError("Feature engineer is not fitted / loaded.")
 
         cust_id, term_id = tx["CUSTOMER_ID"], tx["TERMINAL_ID"]
-        ts = pd.Timestamp(tx["TX_DATETIME"])
+        ts = _to_naive_ts(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
 
         if cust_id not in self.customer_profiles_.index:
@@ -746,7 +823,7 @@ class FraudFeatureEngineer:
         (so replay / re-scoring of the same event doesn't double-count)."""
         cust_id = tx["CUSTOMER_ID"]
         term_id = tx["TERMINAL_ID"]
-        ts = pd.Timestamp(tx["TX_DATETIME"])
+        ts = _to_naive_ts(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
         state = self._customer_state[cust_id]
         state.last_amounts.append(amount)
