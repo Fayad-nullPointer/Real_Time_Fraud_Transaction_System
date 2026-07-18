@@ -82,6 +82,8 @@ class FraudDetectionPipeline:
         # transaction_id -> OTP issued for that flagged transaction, so a
         # later confirm_transaction_otp() call has something to check against.
         self._pending_otps: Dict[object, str] = {}
+        # List of compromised terminals (Rule Engine Gate)
+        self.compromised_terminals = set()
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -126,9 +128,40 @@ class FraudDetectionPipeline:
         return cls(fe, bundle, explainer, notifier)
 
     # ------------------------------------------------------------------ #
+    def compromise_terminal(self, terminal_id: int):
+        """Dynamically flag a terminal ID as compromised/blacklisted"""
+        self.compromised_terminals.add(terminal_id)
+        logger.warning(f"[bold red][RULE ENGINE] Terminal {terminal_id} flagged as COMPROMISED.[/bold red]")
+
+    # ------------------------------------------------------------------ #
     def process_transaction(
         self, tx: dict, *, update_state: bool = True, explain: bool = False
     ) -> Union[FraudPrediction, Tuple[FraudPrediction, Dict[str, float]]]:
+        # 1. Rule Engine Gate (Is terminal compromised?)
+        if tx.get("TERMINAL_ID") in self.compromised_terminals:
+            prediction = FraudPrediction(
+                transaction_id=tx.get("TRANSACTION_ID"),
+                is_fraud=True,
+                fraud_probability=1.0,
+                scenario_id=2,
+                scenario_name="Terminal Skimming",
+                scenario_confidence=1.0
+            )
+            logger.warning(
+                f"[bold red][ALERT] FRAUD FLAGGED (RULE ENGINE)[/bold red] | TX: {prediction.transaction_id} | Terminal: {tx.get('TERMINAL_ID')} is compromised!",
+                extra={
+                    "event_type": "RULE_ENGINE_BLOCK",
+                    "customer_id": tx.get("CUSTOMER_ID"),
+                    "terminal_id": tx.get("TERMINAL_ID"),
+                    "amount": tx.get("TX_AMOUNT"),
+                    "transaction_id": prediction.transaction_id,
+                    "fraud_probability": 1.0,
+                    "scenario": "Terminal Skimming",
+                }
+            )
+            self._send_fraud_alert(tx, prediction)
+            rule_explanation = {"RULE_compromised_terminal": 1.0}
+            return (prediction, rule_explanation) if explain else prediction
         """
         Score a single new transaction end-to-end.
 
@@ -164,7 +197,7 @@ class FraudDetectionPipeline:
 
         if prediction.is_fraud:
             logger.warning(
-                f"[bold red]🚨 FRAUD FLAGGED[/bold red] | TX: {prediction.transaction_id} | Prob: {prediction.fraud_probability:.3f} | Scenario: {prediction.scenario_name}",
+                f"[bold red][ALERT] FRAUD FLAGGED[/bold red] | TX: {prediction.transaction_id} | Prob: {prediction.fraud_probability:.3f} | Scenario: {prediction.scenario_name}",
                 extra={
                     "event_type": "FRAUD_DETECTED",
                     "customer_id": tx.get("CUSTOMER_ID"),
@@ -252,13 +285,13 @@ class FraudDetectionPipeline:
             return False
         if str(submitted_otp) != expected:
             logger.warning(
-                f"[bold red]❌ OTP mismatch for tx={transaction_id}.[/bold red]",
+                f"[bold red][FAIL] OTP mismatch for tx={transaction_id}.[/bold red]",
                 extra={"event_type": "OTP_FAILED", "transaction_id": transaction_id, "reason": "MISMATCH"}
             )
             return False
         del self._pending_otps[transaction_id]
         logger.info(
-            f"[bold green]✅ OTP confirmed for tx={transaction_id}.[/bold green]",
+            f"[bold green][OK] OTP confirmed for tx={transaction_id}.[/bold green]",
             extra={"event_type": "OTP_VERIFIED", "transaction_id": transaction_id, "status": "APPROVED"}
         )
         return True

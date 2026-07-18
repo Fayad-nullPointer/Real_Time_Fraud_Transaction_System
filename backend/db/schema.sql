@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS customers (
 -- Start card numbers at 100000 to look like real card IDs
 ALTER SEQUENCE customers_customer_id_seq RESTART WITH 100000;
 
+-- ---- Roles (added) -------------------------------------------------------
+-- 'user'  -> regular cardholder, can only use the payment portal / their
+--            own history.
+-- 'admin' -> the only role allowed into the admin dashboard + logs.
+-- More granular roles can be added later; for now this is a simple 2-value
+-- switch. ADD COLUMN IF NOT EXISTS keeps re-running this file idempotent on
+-- an existing database.
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
+
 
 -- 2. Terminals Table
 --    Seeded from the training dataset's terminal lat/lon profiles.
@@ -52,6 +61,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     --   PENDING, APPROVED, PENDING_OTP, VERIFIED, DECLINED
     created_at       TIMESTAMPTZ    DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ---- Per-transaction SHAP explanation (added) -----------------------------
+-- Compact, ranked list of the features that contributed most to this
+-- transaction's fraud_probability, e.g.:
+--   [{"feature": "TX_AMOUNT", "shap_value": 0.42, "type": "fraud"}, ...]
+-- Populated at scoring time in routers/transactions.py from
+-- pipeline_wrapper.score_transaction()'s "top_reasons" output. Used by the
+-- admin dashboard's "click a transaction" detail view.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS shap_explanation JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_tx_customer  ON transactions(customer_id);
 CREATE INDEX IF NOT EXISTS idx_tx_terminal  ON transactions(terminal_id);

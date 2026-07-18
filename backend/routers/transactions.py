@@ -4,16 +4,15 @@ routers/transactions.py
 POST /api/transactions/create  – initiate a transaction (runs ML inference)
 POST /api/transactions/verify  – verify OTP for a pending transaction
 GET  /api/transactions/history – authenticated customer's transaction history
+POST /api/transactions/decline – called when the OTP countdown expires
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Security, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.db.postgres import get_db_pool
@@ -23,23 +22,11 @@ from backend.db.redis_client import (
     get_redis, push_customer_lag, push_customer_tx_time,
     push_terminal_event, store_otp, verify_otp,
 )
-from backend.core.security import decode_token
 from backend.core.pipeline_wrapper import generate_otp, score_transaction
 from backend.core.ws_manager import ws_manager
+from backend.routers.auth import get_current_customer
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
-bearer = HTTPBearer()
-
-
-# ─── Auth dependency ──────────────────────────────────────────────────────────
-
-async def get_current_customer(
-    creds: Annotated[HTTPAuthorizationCredentials, Security(bearer)]
-) -> int:
-    try:
-        return decode_token(creds.credentials)
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -107,9 +94,11 @@ async def create_transaction(
         "_redis_lags":                   lags,
     }
 
-    # Run ML inference (synchronous — runs in thread pool via FastAPI)
+    # Run ML inference (synchronous — runs in thread pool via FastAPI).
+    # Also returns "top_reasons": a compact, ranked list of the SHAP feature
+    # contributions behind this fraud_probability — see pipeline_wrapper.py.
     result = score_transaction(tx_dict)
-    
+
     result = {
         **result,
         "is_fraud": bool(result["is_fraud"]),
@@ -123,25 +112,24 @@ async def create_transaction(
 
     initial_status = "PENDING_OTP" if result["is_fraud"] else "APPROVED"
 
-    # print(type(result["is_fraud"]))
-    # print(type(result["fraud_probability"]))
-    # print(type(result["scenario_id"]))
-
-    # Persist transaction to PostgreSQL
+    # Persist transaction to PostgreSQL (including its SHAP explanation, so
+    # the dashboard can show "why" when an admin clicks into this
+    # transaction later — see GET /api/dashboard/transactions/{id}).
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO transactions (
                 transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
                 user_lat, user_lon, is_fraud, fraud_probability,
-                scenario_id, scenario_name, top_reason, status
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                scenario_id, scenario_name, top_reason, status, shap_explanation
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             """,
             tx_id, customer_id, body.terminal_id, body.tx_amount, now,
             body.lat, body.lon,
             result["is_fraud"], result["fraud_probability"],
             result["scenario_id"], result["scenario_name"],
             result["top_reason"], initial_status,
+            json.dumps(result.get("top_reasons", [])),
         )
 
     # Update Redis velocity state (only for approved transactions)
@@ -150,7 +138,8 @@ async def create_transaction(
         await push_customer_tx_time(customer_id, tx_id, now.timestamp())
         await push_terminal_event(body.terminal_id, customer_id, tx_id, now.timestamp())
 
-    # Broadcast to dashboard WebSocket
+    # Broadcast to dashboard WebSocket (top_reasons included so the live
+    # event feed / logs view can show "why" without a follow-up fetch).
     await ws_manager.broadcast({
         "event":              "TRANSACTION",
         "transaction_id":     tx_id,
@@ -161,6 +150,7 @@ async def create_transaction(
         "is_fraud":           result["is_fraud"],
         "scenario_name":      result["scenario_name"],
         "top_reason":         result["top_reason"],
+        "top_reasons":        result.get("top_reasons", []),
         "status":             initial_status,
         "timestamp":          now.isoformat(),
     })
@@ -254,6 +244,20 @@ async def transaction_history(
         )
     return [dict(r) for r in rows]
 
+def _parse_shap_reasons(value) -> list[dict]:
+    """shap_explanation is stored as JSONB; asyncpg may hand it back as a
+    str or an already-decoded list depending on driver/codec setup —
+    normalize to a Python list either way."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, ValueError):
+        return []
+
 
 @router.post("/decline")
 async def decline_transaction(
@@ -262,12 +266,15 @@ async def decline_transaction(
 ):
     """
     Called by the client when the OTP countdown expires.
-    Marks the transaction as DECLINED and broadcasts to the dashboard.
+    Flags the transaction as fraud (status -> DECLINED) and records
+    "OTP_NOT_ENTERED" as a reason alongside the original SHAP-derived
+    top reasons, so the dashboard's per-transaction detail view shows
+    both "why the model flagged it" AND "why it was ultimately declined".
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         tx = await conn.fetchrow(
-            "SELECT customer_id, status FROM transactions WHERE transaction_id = $1",
+            "SELECT customer_id, status, shap_explanation FROM transactions WHERE transaction_id = $1",
             body.transaction_id,
         )
 
@@ -279,10 +286,22 @@ async def decline_transaction(
         # Already resolved — idempotent, just return ok
         return {"status": tx["status"], "message": "Transaction already resolved."}
 
+    # Prepend the OTP-timeout reason to the existing ranked SHAP reasons
+    # (rather than replacing them) so both the model's original evidence
+    # and the customer's failure to verify are visible together.
+    existing_reasons = _parse_shap_reasons(tx["shap_explanation"])
+    otp_reason = {"feature": "OTP_NOT_ENTERED", "shap_value": None, "type": "otp"}
+    updated_reasons = [otp_reason] + existing_reasons
+
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE transactions SET status = 'DECLINED' WHERE transaction_id = $1",
-            body.transaction_id,
+            """
+            UPDATE transactions
+            SET status = 'DECLINED', is_fraud = TRUE,
+                top_reason = 'OTP_NOT_ENTERED', shap_explanation = $2
+            WHERE transaction_id = $1
+            """,
+            body.transaction_id, json.dumps(updated_reasons),
         )
 
     # Delete any leftover OTP from Redis
@@ -294,8 +313,11 @@ async def decline_transaction(
         "transaction_id": body.transaction_id,
         "customer_id":    customer_id,
         "status":         "DECLINED",
+        "is_fraud":       True,
         "reason":         "OTP_TIMEOUT",
+        "top_reason":     "OTP_NOT_ENTERED",
+        "top_reasons":    updated_reasons,
         "timestamp":      datetime.now(timezone.utc).isoformat(),
     })
 
-    return {"status": "DECLINED", "message": "OTP timed out. Transaction declined as fraud."}
+    return {"status": "DECLINED", "message": "OTP timed out. Transaction flagged as fraud."}

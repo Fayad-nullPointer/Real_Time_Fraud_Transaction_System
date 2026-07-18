@@ -16,3 +16,5 @@ insights.txt
 *.ipynb
 data/
 credintials/
+logs/
+*.log

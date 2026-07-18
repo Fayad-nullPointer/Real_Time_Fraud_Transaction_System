@@ -3,8 +3,8 @@
    Connects to FastAPI backend via REST + WebSocket
    ============================================================ */
 
-const API = "http://localhost:8008";
-const WS  = "ws://localhost:8008/api/dashboard/ws";
+const API    = "http://localhost:8008";
+const WS_BASE = "ws://localhost:8008/api/dashboard/ws";
 
 const MAX_LIVE_ROWS   = 50;
 const MAX_FEED_EVENTS = 80;
@@ -14,20 +14,114 @@ let volumeChart, fraudTrendChart, scenariosChart, reasonsChart;
 let fraudMap, fraudMapLayer;
 let metricsCache = {};
 let activeTab = "overview";
+let alertsSeeded = false;
+let customersLoaded = false;
+let dashboardInitialized = false;
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", async () => {
+// ── Admin auth state ─────────────────────────────────────────────────────────
+// The dashboard is admin-only. We hold the JWT from POST /api/auth/login in
+// memory + localStorage; every REST call below sends it as a Bearer token,
+// and the WebSocket sends it as a `?token=` query param (browsers can't set
+// headers on a WS handshake).
+let adminToken    = localStorage.getItem("admin_token") || null;
+let adminIdentity = JSON.parse(localStorage.getItem("admin_identity") || "null");
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  const form = document.getElementById("admin-login-form");
+  if (form) form.addEventListener("submit", handleAdminLogin);
+
+  if (adminToken && adminIdentity) {
+    enterDashboard();
+  } else {
+    showAdminAuth();
+  }
+});
+
+function showAdminAuth() {
+  document.getElementById("admin-auth-screen").classList.remove("hidden");
+  document.getElementById("dashboard-root").classList.add("hidden");
+}
+
+async function handleAdminLogin(e) {
+  e.preventDefault();
+  const btn = document.getElementById("admin-login-btn");
+  const errEl = document.getElementById("admin-login-error");
+  errEl.classList.remove("visible");
+
+  const customerId = parseInt(document.getElementById("admin-login-id").value);
+  const password    = document.getElementById("admin-login-pass").value;
+
+  btn.disabled = true;
+  btn.textContent = "Signing in…";
+
+  try {
+    const res = await fetch(API + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customer_id: customerId, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Invalid credentials.");
+
+    if (data.role !== "admin") {
+      throw new Error("Access denied — this account does not have dashboard access.");
+    }
+
+    adminToken    = data.token;
+    adminIdentity = { customer_id: data.customer_id, full_name: data.full_name };
+    localStorage.setItem("admin_token", adminToken);
+    localStorage.setItem("admin_identity", JSON.stringify(adminIdentity));
+
+    enterDashboard();
+  } catch (err) {
+    errEl.textContent = err.message || "Sign-in failed.";
+    errEl.classList.add("visible");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Sign in";
+  }
+}
+
+function handleAdminLogout() {
+  adminToken = null;
+  adminIdentity = null;
+  localStorage.removeItem("admin_token");
+  localStorage.removeItem("admin_identity");
+  location.reload();
+}
+
+function enterDashboard() {
+  document.getElementById("admin-auth-screen").classList.add("hidden");
+  document.getElementById("dashboard-root").classList.remove("hidden");
+
+  const label = document.getElementById("admin-session-label");
+  if (label && adminIdentity) {
+    label.textContent = `Admin — ${adminIdentity.full_name || "#" + adminIdentity.customer_id}`;
+  }
+
+  if (dashboardInitialized) return;
+  dashboardInitialized = true;
+
+  initDashboard();
+}
+
+async function initDashboard() {
   startClock();
   initCharts();
   initFraudMap();
   connectWebSocket();
   await fetchAll();
+  await loadCustomers();
   setInterval(fetchAll, 30_000);
 
-  document.getElementById("btn-refresh").addEventListener("click", fetchAll);
+  document.getElementById("btn-refresh").addEventListener("click", () => {
+    fetchAll();
+    loadCustomers();
+  });
   setupNavTabs();
   setupLogFilters();
-});
+}
 
 // ── Clock ─────────────────────────────────────────────────────────────────────
 function startClock() {
@@ -58,10 +152,18 @@ async function fetchAll() {
     updateKPIs(metrics);
     updateCharts(metrics);
     updateFunnel(metrics.otp_funnel);
-    renderFraudTable(txList.filter(t => t.is_fraud).slice(0, 12));
+    const fraudTx = txList.filter(t => t.is_fraud);
+    renderFraudTable(fraudTx.slice(0, 12));
     populateLiveTable(txList.slice(0, MAX_LIVE_ROWS));
     updateSystemHealth(system);
     document.getElementById("last-updated").textContent = "Last updated: " + new Date().toLocaleTimeString();
+
+    // Seed the Alerts panel from already-recorded fraud transactions
+    // (only once — live events take over from here via the WebSocket).
+    if (!alertsSeeded) {
+      seedAlertsFromHistory(fraudTx);
+      alertsSeeded = true;
+    }
 
     // Refresh fraud map data
     refreshFraudMap();
@@ -71,7 +173,15 @@ async function fetchAll() {
 }
 
 async function apiFetch(path) {
-  const r = await fetch(API + path);
+  const r = await fetch(API + path, {
+    headers: adminToken ? { "Authorization": `Bearer ${adminToken}` } : {},
+  });
+  if (r.status === 401 || r.status === 403) {
+    // Token missing/expired/not-admin — drop the session and show the login
+    // screen again rather than silently failing every widget on the page.
+    handleAdminLogout();
+    throw new Error(`Admin session invalid (HTTP ${r.status}) for ${path}`);
+  }
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${path}`);
   return r.json();
 }
@@ -87,6 +197,8 @@ function updateKPIs(d) {
   set("val-rate",      (d.fraud_rate ?? 0).toFixed(2) + "%");
   set("val-customers", d.active_customers?.toLocaleString() ?? "—");
   set("val-terminals", d.active_terminals?.toLocaleString() ?? "—");
+  set("val-reg-customers", d.registered_customers?.toLocaleString() ?? "—");
+  set("val-reg-terminals", d.registered_terminals?.toLocaleString() ?? "—");
 }
 
 function fmtMoney(n) {
@@ -269,6 +381,7 @@ function prependLiveRow(tx) {
 function buildLiveRow(tx, animate) {
   const tr = document.createElement("tr");
   if (animate) tr.classList.add("row-new");
+  tr.classList.add("cust-row"); // reuse the existing clickable-row hover style
   const t = new Date(tx.tx_datetime || tx.timestamp);
   tr.innerHTML = `
     <td>${t.toLocaleTimeString()}</td>
@@ -278,6 +391,9 @@ function buildLiveRow(tx, animate) {
     <td>${probBadge(tx.fraud_probability)}</td>
     <td>${statusBadge(tx.status)}</td>
   `;
+  if (tx.transaction_id) {
+    tr.addEventListener("click", () => openTransactionModal(tx.transaction_id));
+  }
   return tr;
 }
 
@@ -351,11 +467,40 @@ function pushAlert(text, type = "warning") {
   set("alert-count", alertCount);
 }
 
+// Populate the Alerts panel with fraudulent transactions that already exist
+// in the database (e.g. from before this browser tab was opened), oldest
+// first, so the panel reads top-to-bottom the same way live alerts would.
+function seedAlertsFromHistory(fraudTxList) {
+  const list = document.getElementById("alert-list");
+  if (!list || !fraudTxList || !fraudTxList.length) return;
+
+  const ordered = [...fraudTxList].sort(
+    (a, b) => new Date(a.tx_datetime) - new Date(b.tx_datetime)
+  );
+
+  ordered.forEach(tx => {
+    const t = new Date(tx.tx_datetime).toLocaleTimeString();
+    const shortId = (tx.transaction_id || "").slice(0, 8);
+    const pct = ((tx.fraud_probability ?? 0) * 100).toFixed(1);
+    const type = tx.status === "DECLINED" ? "danger" : "warning";
+    const text = `🚨 Fraud: TX ${shortId} — ${tx.scenario_name || "Unknown scenario"} (${pct}%) — ${tx.status}`;
+
+    const div = document.createElement("div");
+    div.className = `alert-item alert-${type}`;
+    div.innerHTML = `<span class="alert-time">${t}</span><span class="alert-text">${text}</span>`;
+    list.appendChild(div);
+    alertCount++;
+  });
+
+  while (list.children.length > MAX_ALERTS) list.removeChild(list.firstChild);
+  set("alert-count", alertCount);
+}
+
 // ── Fraud Table ───────────────────────────────────────────────────────────────
 function renderFraudTable(rows) {
   const tbody = document.getElementById("fraud-tbody");
   tbody.innerHTML = rows.map(r => `
-    <tr>
+    <tr class="cust-row" onclick="openTransactionModal('${r.transaction_id}')">
       <td>${r.transaction_id?.slice(0,8)}…</td>
       <td>${r.scenario_name || "—"}</td>
       <td>${probBadge(r.fraud_probability)}</td>
@@ -619,7 +764,11 @@ function connectWebSocket() {
 
   let ws;
   const connect = () => {
-    ws = new WebSocket(WS);
+    // Browsers can't set an Authorization header on a WS handshake, so the
+    // admin JWT rides along as a query param instead — see
+    // routers/dashboard.py's dashboard_ws.
+    const wsUrl = `${WS_BASE}?token=${encodeURIComponent(adminToken || "")}`;
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
       dot.className  = "dot dot-green";
@@ -664,6 +813,167 @@ function connectWebSocket() {
   };
 
   connect();
+}
+
+// ── Customers Tab ─────────────────────────────────────────────────────────────
+async function loadCustomers() {
+  const tbody = document.getElementById("customers-tbody");
+  if (!tbody) return;
+  try {
+    const customers = await apiFetch("/api/dashboard/customers?limit=200");
+    renderCustomersTable(customers);
+    customersLoaded = true;
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="log-error">⚠ Could not load customers.</td></tr>`;
+    console.warn("loadCustomers error:", e);
+  }
+}
+
+function renderCustomersTable(customers) {
+  const tbody = document.getElementById("customers-tbody");
+  if (!tbody) return;
+
+  if (!customers.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="log-empty">No registered customers yet.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = customers.map(c => `
+    <tr class="cust-row" onclick="openCustomerModal(${c.customer_id})">
+      <td>
+        <div class="cust-name-cell">
+          <span class="cust-name-id">#${c.customer_id}${c.full_name ? " · " + c.full_name : ""}</span>
+          <span class="cust-name-phone">${c.phone_number ?? ""}</span>
+        </div>
+      </td>
+      <td>${c.location || "Unknown"}</td>
+      <td>${c.total_txns?.toLocaleString() ?? 0}</td>
+      <td>$${(c.avg_amount ?? 0).toFixed(2)}</td>
+      <td>${riskPill(c.risk_score)}</td>
+    </tr>
+  `).join("");
+}
+
+function riskPill(score) {
+  const s = score ?? 0;
+  const level = s >= 70 ? "high" : s >= 35 ? "medium" : "low";
+  return `<span class="risk-pill risk-${level}"><span class="risk-dot"></span>${s}</span>`;
+}
+
+async function openCustomerModal(customerId) {
+  const modal = document.getElementById("customer-modal");
+  modal.classList.remove("hidden");
+  document.getElementById("cm-id").textContent = `Customer #${customerId}`;
+  document.getElementById("cm-meta").textContent = "Loading…";
+  document.getElementById("cm-stats").innerHTML = "";
+  document.getElementById("cm-recent-list").innerHTML = "";
+
+  try {
+    const c = await apiFetch(`/api/dashboard/customers/${customerId}`);
+
+    document.getElementById("cm-id").textContent =
+      `Customer #${c.customer_id}${c.full_name ? " · " + c.full_name : ""}`;
+    document.getElementById("cm-meta").textContent =
+      `${c.phone_number ?? "—"} · ${c.location || "Unknown"}`;
+
+    const riskLevel = c.risk_score >= 70 ? "high" : c.risk_score >= 35 ? "medium" : "low";
+    document.getElementById("cm-stats").innerHTML = `
+      <div class="cust-stat"><div class="cust-stat-label">Mean Amount</div><div class="cust-stat-value">$${c.mean_amount.toFixed(2)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Std Deviation</div><div class="cust-stat-value">$${c.std_amount.toFixed(2)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Txns / Day</div><div class="cust-stat-value">${c.txns_per_day}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Terminals Used</div><div class="cust-stat-value">${c.terminals_used}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Total Txns</div><div class="cust-stat-value">${c.total_txns.toLocaleString()}</div></div>
+      <div class="cust-stat cust-stat-risk"><div class="cust-stat-label">Risk Score</div><div class="cust-stat-value risk-${riskLevel}">${c.risk_score}</div></div>
+    `;
+
+    const recentList = document.getElementById("cm-recent-list");
+    if (!c.recent_transactions.length) {
+      recentList.innerHTML = `<div class="log-empty">No transactions yet.</div>`;
+    } else {
+      recentList.innerHTML = c.recent_transactions.map(r => `
+        <div class="cust-recent-item clickable ${r.is_fraud ? "is-fraud" : ""}"
+             onclick="openTransactionModal('${r.transaction_id}')">
+          <span class="cust-recent-id">TX-${(r.transaction_id || "").toString().slice(0, 6)}</span>
+          <span class="cust-recent-amount">$${r.tx_amount.toFixed(2)}</span>
+          <span class="cust-recent-time">${r.days_ago}d ago</span>
+        </div>
+      `).join("");
+    }
+  } catch (e) {
+    document.getElementById("cm-meta").textContent = "Could not load this customer's profile.";
+    console.warn("openCustomerModal error:", e);
+  }
+}
+
+function closeCustomerModal() {
+  document.getElementById("customer-modal").classList.add("hidden");
+}
+
+// ── Transaction Detail Modal (per-transaction SHAP explanation) ──────────────
+// Opened by clicking a transaction row anywhere in the dashboard (Live
+// table, Recent Fraud Cases, or a customer's Recent Transactions list).
+// Fetches GET /api/dashboard/transactions/{id}, which returns the
+// transaction plus its ranked shap_explanation — the features that
+// contributed most to that transaction's fraud_probability.
+async function openTransactionModal(transactionId) {
+  if (!transactionId) return;
+  const modal = document.getElementById("transaction-modal");
+  modal.classList.remove("hidden");
+  document.getElementById("tm-id").textContent = `TX-${transactionId.toString().slice(0, 8)}…`;
+  document.getElementById("tm-meta").textContent = "Loading…";
+  document.getElementById("tm-stats").innerHTML = "";
+  document.getElementById("tm-shap-list").innerHTML = "";
+
+  try {
+    const tx = await apiFetch(`/api/dashboard/transactions/${transactionId}`);
+
+    const dt = new Date(tx.tx_datetime).toLocaleString();
+    document.getElementById("tm-meta").textContent =
+      `Customer #${tx.customer_id} · Terminal ${tx.terminal_id} · ${dt}`;
+
+    document.getElementById("tm-stats").innerHTML = `
+      <div class="cust-stat"><div class="cust-stat-label">Amount</div><div class="cust-stat-value">$${parseFloat(tx.tx_amount).toFixed(2)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Status</div><div class="cust-stat-value">${statusBadge(tx.status)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Fraud Probability</div><div class="cust-stat-value">${probBadge(tx.fraud_probability)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Scenario</div><div class="cust-stat-value" style="font-size:0.85rem">${tx.scenario_name || "—"}</div></div>
+    `;
+
+    renderShapList(tx.shap_explanation || []);
+  } catch (e) {
+    document.getElementById("tm-meta").textContent = "Could not load this transaction.";
+    console.warn("openTransactionModal error:", e);
+  }
+}
+
+function renderShapList(reasons) {
+  const container = document.getElementById("tm-shap-list");
+  if (!reasons.length) {
+    container.innerHTML = `<div class="shap-empty">No SHAP explanation was recorded for this transaction (usually means it wasn't flagged as fraud, or the explainer wasn't loaded when it was scored).</div>`;
+    return;
+  }
+
+  const maxAbs = Math.max(...reasons.map(r => Math.abs(r.shap_value)), 1e-6);
+
+  container.innerHTML = reasons.map(r => {
+    const isPos = r.shap_value >= 0;
+    const widthPct = Math.min(100, Math.round((Math.abs(r.shap_value) / maxAbs) * 50)); // half-track each side
+    return `
+      <div class="shap-row">
+        <div class="shap-row-top">
+          <span class="shap-feature">${r.feature}<span class="shap-type-tag">${r.type}</span></span>
+          <span class="shap-value ${isPos ? "positive" : "negative"}">${isPos ? "+" : ""}${r.shap_value.toFixed(4)}</span>
+        </div>
+        <div class="shap-bar-track">
+          <span class="shap-bar-mid"></span>
+          <span class="shap-bar-fill ${isPos ? "positive" : "negative"}" style="width:${widthPct}%"></span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function closeTransactionModal() {
+  document.getElementById("transaction-modal").classList.add("hidden");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
