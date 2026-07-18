@@ -83,19 +83,34 @@ TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
 
 ---
 
-## 3. How to Run Inference (Local Testing)
+## 3.5 Real-Time Kafka Streaming Simulation
 
-We provide a dedicated **`inference.py`** script specifically designed to test the new end-to-end flow, including the interactive Twilio WhatsApp OTP prompt.
+We have built a production-grade, asynchronous **Kafka stream processing simulation** that operates directly inside Python (without requiring any external Docker, JVM, or ZooKeeper setups). This makes it ideal for running in Visual Studio Code or Google Colab out of the box.
 
+To run the full concurrent Producer + Consumer streaming pipeline:
 ```bash
-python inference.py
+# Recommended command to run the interactive simulation:
+uv run python run_kafka_pipeline.py --speed 0.5 --max-tx 100 --explain --interactive
 ```
 
-**What this script does:**
-1. Loads the pipeline and SHAP explainer.
-2. Pulls 4 sample transactions (Normal, Large Amount, Skimming, Credential Takeover).
-3. **Important:** Open `inference.py` and change `raw_tx["PHONE_NUMBER"] = "+201000000000"` to your actual verified Twilio Sandbox number!
-4. If a transaction is flagged, you will receive a WhatsApp message. The terminal will pause and ask you to type the OTP to approve the transaction.
+### Advanced Production Simulation Features:
+1. **JSON SerDe (Byte Serialization):** The producer converts dictionaries into raw UTF-8 JSON bytes and publishes them to the in-memory topic. The consumer deserializes the bytes back into Python objects, replicating wire-level transmission.
+2. **Dead Letter Queue (DLQ):** If a corrupted or malformed message enters the stream (e.g. missing `CUSTOMER_ID`), the consumer catches the exception and routes the transaction payload to the `fraud-dlq` topic instead of crashing the service.
+3. **Live Metrics Dashboard:** The consumer prints a real-time `rich` formatted stats panel displaying:
+   * **Approved**: Total transactions successfully approved (either automatically clean or confirmed by correct OTP).
+   * **Blocked (Declined)**: Transactions permanently blocked because the OTP verification failed or timed out.
+   * **Compromised Terminals**: Total unique terminals currently blacklisted.
+   * **Fraud Flagged (OTP Sent)**: Total number of OTPs triggered.
+   * **User Approved (OTP)**: Number of fraud cases approved by correct OTP inputs.
+4. **Interactive vs. Automated OTPs:** If a transaction is flagged as fraud:
+   * By default, it runs in **automated mode** where a mock user inputs the WhatsApp OTP after a fraction of a second (simulating a response).
+   * Run with `--interactive` to suspend processing and manually type the OTP into the console to approve or reject the card charge.
+5. **Real-Time Customer Feedback Loop & Rule Engine (Scenario 2):**
+   * If a transaction is a **False Negative** (ML model missed the fraud and approved it), the pipeline simulates a customer reporting the fraud.
+   * On the **very first report**, the terminal is immediately blacklisted (`Compromised Terminals` increments).
+   * Any subsequent transaction from that terminal is intercepted by the **Rule Engine Gate**, flagged as `Terminal Skimming` (Scenario 2) with 100% probability, and routed directly to the OTP flow, bypassing the ML model entirely to protect the system.
+6. **40-Second OTP Timeout**: In interactive mode, if the user does not enter the OTP within **40 seconds**, the verification window automatically expires, the transaction is marked as blocked, and the stream resumes.
+7. **Instant Graceful Shutdown:** Pressing `Ctrl+C` (SIGINT) cleanly aborts the OTP input prompt immediately, shuts down all threads safely, and displays the **Final Stream Metrics Report** instantly.
 
 ---
 
@@ -149,8 +164,10 @@ if prediction.is_fraud:
 
 | Module | Description |
 |---|---|
+| **`run_kafka_pipeline.py`** | **[NEW]** Asynchronous Kafka simulation runner with metrics, SerDe, and DLQ handling. |
 | **`inference.py`** | **[NEW]** Interactive CLI script to test scoring, SHAP, and Twilio OTPs. |
 | **`scripts/fraud_pipeline.py`** | `FraudDetectionPipeline` — The main real-time scoring API wrapper. |
+| **`scripts/kafka_simulation.py`** | **[NEW]** In-memory thread-safe queues simulating Kafka broker, producer, and consumer APIs. |
 | **`scripts/twilio_notifier.py`** | **[NEW]** `WhatsAppNotifier` — Handles secure Twilio communication. |
 | **`scripts/logger.py`** | **[NEW]** Dual-logger outputting `rich` terminal colors and structured JSON. |
 | **`scripts/explainability.py`** | `FraudModelExplainer` — Computes SHAP and feature importance. |

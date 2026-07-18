@@ -1,7 +1,9 @@
 import sys
 import json
+import os
 import pandas as pd
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -11,6 +13,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
+# Load environment variables
+load_dotenv()
 
 from scripts.fraud_pipeline import FraudDetectionPipeline
 from scripts.logger import get_logger
@@ -54,9 +59,9 @@ def test_scenarios():
             if k in ["TRANSACTION_ID", "CUSTOMER_ID", "TERMINAL_ID", "TX_DATETIME", "TX_AMOUNT"]
         }
         
-        # --- Inject Dummy Phone Number for Testing Twilio ---
-        # Change this dummy number to your VERIFIED Sandbox number to test it!
-        raw_tx["PHONE_NUMBER"] = "+201093836155"
+        # --- Inject Phone Number for Testing Twilio ---
+        # Change this number to your VERIFIED Sandbox number to test it!
+        raw_tx["PHONE_NUMBER"] = os.getenv("USER_PHONE_NUMBER", "+201093836155")
         
         logger.info("Incoming Raw Transaction:")
         print(json.dumps(raw_tx, indent=2))
