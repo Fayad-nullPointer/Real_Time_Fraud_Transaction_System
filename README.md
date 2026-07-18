@@ -271,6 +271,124 @@ uv run python -m backend.db.seed
 
 ---
 
+## 7. Create an Admin User
+
+The dashboard (`GET /api/dashboard/*` and the `/api/dashboard/ws` live feed) is **admin-only**. Every new registration is created with `role = 'user'` by default, so you need to register an account and then promote it to `admin` directly in PostgreSQL.
+
+### Option 1: Register from the User Portal (Recommended)
+
+Start your backend:
+
+```bash
+uv run uvicorn backend.main:app --reload --port 8008
+```
+
+Open:
+
+```
+frontend/user_portal/index.html
+```
+
+or
+
+```
+http://127.0.0.1:5501
+```
+
+(if you're serving it with `python -m http.server`).
+
+Fill in:
+- Phone Number
+- Password
+
+Click **Register**.
+
+Then continue to the PostgreSQL step below.
+
+### Option 2: Register using curl
+
+Open a terminal.
+
+**Windows PowerShell**
+
+Use `Invoke-RestMethod` (much easier than curl on Windows):
+
+```powershell
+Invoke-RestMethod `
+    -Uri "http://localhost:8008/api/auth/register" `
+    -Method POST `
+    -ContentType "application/json" `
+    -Body '{"phone_number":"+201012345678","password":"123456789"}'
+```
+
+or if you want to use `curl.exe` explicitly:
+
+```powershell
+curl.exe -X POST "http://localhost:8008/api/auth/register" `
+-H "Content-Type: application/json" `
+-d "{\"phone_number\":\"+201012345678\",\"password\":\"123456789\"}"
+```
+
+If registration succeeds you'll receive something like:
+
+```json
+{
+  "customer_id": 5,
+  "access_token": "...",
+  "token_type": "bearer"
+}
+```
+
+Write down the `customer_id`.
+
+### Promote the user to admin
+
+Since you're using PostgreSQL inside Docker, enter the container:
+
+```bash
+docker exec -it fraud-postgres psql -U postgres -d fraud_db
+```
+
+or
+
+```bash
+docker exec -it fraud-postgres bash
+psql -U postgres -d fraud_db
+```
+
+Then execute:
+
+```sql
+UPDATE customers
+SET role = 'admin'
+WHERE customer_id = 5;
+```
+
+Replace `5` with the `customer_id` returned during registration.
+
+Verify it:
+
+```sql
+SELECT customer_id, phone_number, role
+FROM customers;
+```
+
+You should see:
+
+```
+ customer_id | phone_number  | role
+-------------+---------------+-------
+5            | +201012345678 | admin
+```
+
+Exit PostgreSQL:
+
+```sql
+\q
+```
+
+---
+
 ## Environment Variables Reference
 
 | Variable | Description |

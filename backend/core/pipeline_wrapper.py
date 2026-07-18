@@ -53,6 +53,36 @@ def generate_otp(length: int = 6) -> str:
     return "".join(random.choices(string.digits, k=length))
 
 
+def _rank_top_reasons(explanation: dict | None, top_n: int = 6) -> list[dict]:
+    """
+    Turn the raw `shap_fraud_<feature>` / `shap_scenario_<feature>` dict
+    from FraudModelExplainer.explain_transaction into a small, ranked,
+    UI-ready list:
+
+        [{"feature": "TX_AMOUNT", "shap_value": 0.42, "type": "fraud"}, ...]
+
+    Ranked by absolute SHAP value across BOTH the fraud and scenario
+    explanations together, since for a flagged transaction both are
+    relevant ("why fraud" and "why this scenario"). This is what gets
+    persisted to transactions.shap_explanation and returned to the
+    dashboard for the per-transaction detail view.
+    """
+    if not explanation:
+        return []
+
+    ranked = sorted(explanation.items(), key=lambda kv: abs(kv[1]), reverse=True)[:top_n]
+    out = []
+    for key, value in ranked:
+        if key.startswith("shap_scenario_"):
+            feature, kind = key[len("shap_scenario_"):], "scenario"
+        elif key.startswith("shap_fraud_"):
+            feature, kind = key[len("shap_fraud_"):], "fraud"
+        else:
+            feature, kind = key, "fraud"
+        out.append({"feature": feature, "shap_value": round(float(value), 6), "type": kind})
+    return out
+
+
 def score_transaction(tx_dict: dict) -> dict:
     """
     Runs the ML pipeline on tx_dict and returns a result dict.
@@ -64,8 +94,9 @@ def score_transaction(tx_dict: dict) -> dict:
         "fraud_probability": float,
         "scenario_id": int | None,
         "scenario_name": str | None,
-        "top_reason": str | None,
-        "explanation": dict | None,
+        "top_reason": str | None,          # single highest-|SHAP| feature name
+        "top_reasons": list[dict],         # ranked, UI-ready — see _rank_top_reasons
+        "explanation": dict | None,        # raw shap_fraud_*/shap_scenario_* dict
     }
     """
     global _inference_time_ms
@@ -87,5 +118,6 @@ def score_transaction(tx_dict: dict) -> dict:
         "scenario_id":      prediction.scenario_id,
         "scenario_name":    prediction.scenario_name,
         "top_reason":       top_reason,
+        "top_reasons":      _rank_top_reasons(explanation),
         "explanation":      explanation,
     }

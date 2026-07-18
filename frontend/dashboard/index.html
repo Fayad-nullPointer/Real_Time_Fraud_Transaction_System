@@ -15,6 +15,34 @@
   <link rel="stylesheet" href="dashboard.css" />
 </head>
 <body>
+
+  <!-- ── Admin login screen ───────────────────────────────────────────── -->
+  <!-- The dashboard is admin-only. This gate shows until a token with
+       role === 'admin' is obtained from POST /api/auth/login. -->
+  <div id="admin-auth-screen" class="admin-auth-screen">
+    <div class="admin-auth-card">
+      <div class="admin-auth-brand">
+        <span class="brand-icon">🛡️</span>
+        <h1>FraudShield</h1>
+        <p>Security Dashboard — Admin sign-in required</p>
+      </div>
+      <form id="admin-login-form" class="admin-auth-form">
+        <div class="field-group">
+          <label for="admin-login-id">Admin Card ID</label>
+          <input id="admin-login-id" type="number" placeholder="e.g. 100000" required />
+        </div>
+        <div class="field-group">
+          <label for="admin-login-pass">Password</label>
+          <input id="admin-login-pass" type="password" placeholder="Enter password" required />
+        </div>
+        <div class="admin-auth-error" id="admin-login-error"></div>
+        <button type="submit" class="btn-refresh admin-login-btn" id="admin-login-btn">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Dashboard (hidden until an admin token is verified) ─────────── -->
+  <div id="dashboard-root" class="hidden" style="display:flex;width:100%;">
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -33,6 +61,10 @@
     <div class="sidebar-footer">
       <div class="connection-badge" id="ws-badge">
         <span class="dot dot-red"></span><span id="ws-status-text">Connecting…</span>
+      </div>
+      <div class="admin-session-row">
+        <span id="admin-session-label">Admin —</span>
+        <button class="admin-logout-btn" onclick="handleAdminLogout()">Logout</button>
       </div>
     </div>
   </aside>
@@ -226,7 +258,7 @@
         </div>
         <!-- Recent Fraud Cases -->
         <div class="card">
-          <div class="card-header"><span class="card-title">🗂 Recent Fraud Cases</span></div>
+          <div class="card-header"><span class="card-title">🗂 Recent Fraud Cases</span><span class="card-sub">click a row for the SHAP breakdown</span></div>
           <div class="table-wrapper">
             <table class="data-table" id="fraud-table">
               <thead>
@@ -357,11 +389,30 @@
       </div>
       <div class="cust-modal-stats" id="cm-stats"></div>
       <div class="cust-modal-recent">
-        <h4>Recent Transactions</h4>
+        <h4>Recent Transactions <span class="cm-recent-hint">(click one for details)</span></h4>
         <div id="cm-recent-list"></div>
       </div>
     </div>
   </div>
+
+  <!-- ── Transaction Detail Modal (SHAP breakdown) ── -->
+  <div id="transaction-modal" class="overlay hidden">
+    <div class="overlay-bg" onclick="closeTransactionModal()"></div>
+    <div class="tx-modal-card glass-card">
+      <button class="modal-close" onclick="closeTransactionModal()" aria-label="Close">✕</button>
+      <div class="tx-modal-header">
+        <div class="tx-modal-id" id="tm-id">—</div>
+        <div class="tx-modal-meta" id="tm-meta">—</div>
+      </div>
+      <div class="tx-modal-stats" id="tm-stats"></div>
+      <div class="tx-modal-shap">
+        <h4>What contributed to this score</h4>
+        <div id="tm-shap-list"></div>
+      </div>
+    </div>
+  </div>
+
+  </div> <!-- /#dashboard-root -->
 
   <script src="dashboard.js"></script>
 </body>
