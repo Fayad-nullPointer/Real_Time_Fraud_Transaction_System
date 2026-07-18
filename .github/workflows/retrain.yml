@@ -1,0 +1,46 @@
+name: Retrain Fraud Models
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually from the Actions tab
+
+jobs:
+  train-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push commits back to the repo
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true # Needed if you push large CSVs using Git LFS
+
+      # Set up uv (a fast python package manager)
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12 # Or 3.13 / 3.14 if compatible in your environment
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run Model Retraining
+        run: |
+          # Use the 'full dataset with brief' folder instead of 'data'
+          uv run python scripts/train_and_save_models.py --data-dir "full dataset with brief"
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add the newly generated models and pickles
+          git add models/
+          
+          # Commit the changes (it will not error if there are no changes)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: Retrain fraud detection models" && git push)
