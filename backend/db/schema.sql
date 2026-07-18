@@ -69,7 +69,12 @@ CREATE TABLE IF NOT EXISTS transactions (
 -- Populated at scoring time in routers/transactions.py from
 -- pipeline_wrapper.score_transaction()'s "top_reasons" output. Used by the
 -- admin dashboard's "click a transaction" detail view.
-ALTER TABLE transactions ADD COLUMN IF NOT EXISTS shap_explanation JSONB;
+-- ---- OTP expiry (added) ----------------------------------------------
+-- When a transaction enters PENDING_OTP, this is set to "now + 40s".
+-- Used by the server-side sweep in routers/transactions.py so a
+-- transaction can never get stuck pending forever (e.g. the customer
+-- just closes the tab and the client-side countdown never fires).
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_tx_customer  ON transactions(customer_id);
 CREATE INDEX IF NOT EXISTS idx_tx_terminal  ON transactions(terminal_id);

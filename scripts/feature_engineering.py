@@ -407,6 +407,65 @@ class FraudFeatureEngineer:
         state = self._customer_state.get(customer_id)
         return bool(state and len(state.recent_tx_times) > 0)
 
+    def get_debug_state(self, customer_id) -> dict:
+        """
+        Snapshot of everything this feature engineer currently knows about
+        `customer_id` — for verifying that realtime lag/velocity state is
+        updating correctly (e.g. an admin "inspect model state" view).
+
+        NOTE: tx_count_1h/4h here are computed against wall-clock "now" for
+        display purposes. At actual scoring time they're computed against the
+        incoming transaction's own TX_DATETIME instead, so these numbers are
+        an approximation, not exactly what the next `transform()` call will see.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Feature engineer is not fitted / loaded.")
+
+        known = customer_id in self.customer_profiles_.index
+        out = {
+            "customer_id": customer_id,
+            "known_profile": known,
+            "is_cold_start": self.is_cold_start(customer_id),
+            "is_warm": self.is_warm(customer_id),
+            "profile": None,
+            "spending_tier": None,
+        }
+
+        if known:
+            cust = self.customer_profiles_.loc[customer_id]
+            out["profile"] = {
+                "mean_amount": float(cust["mean_amount"]),
+                "std_amount": float(cust["std_amount"]),
+                "mean_nb_tx_per_day": float(cust["mean_nb_tx_per_day"]),
+                "nb_terminals": float(cust["nb_terminals"]),
+                "x_customer_id": float(cust["x_customer_id"]),
+                "y_customer_id": float(cust["y_customer_id"]),
+            }
+            out["spending_tier"] = str(self.customer_tier_.get(customer_id))
+
+        state = self._customer_state.get(customer_id)
+        if state is not None:
+            now = pd.Timestamp.now()
+            recent = list(state.recent_tx_times)
+            out["realtime"] = {
+                "last_amounts_chronological": list(state.last_amounts),
+                "tx_count_1h_approx": sum(1 for t in recent if now - t < pd.Timedelta(hours=1)),
+                "tx_count_4h_approx": sum(1 for t in recent if now - t < pd.Timedelta(hours=4)),
+                "buffered_tx_times": [str(t) for t in recent],
+                "cold_start_running_n": state.running_n,
+                "cold_start_running_mean": state.running_mean if state.running_n else None,
+            }
+        else:
+            out["realtime"] = {
+                "last_amounts_chronological": [],
+                "tx_count_1h_approx": 0,
+                "tx_count_4h_approx": 0,
+                "buffered_tx_times": [],
+                "cold_start_running_n": 0,
+                "cold_start_running_mean": None,
+            }
+        return out
+
     # ------------------------------------------------------------------ #
     # Daily risk-stat maintenance (call nightly with newly confirmed labels)
     # ------------------------------------------------------------------ #

@@ -168,12 +168,14 @@ function txItem(r) {
   const statusIcon = { APPROVED: "✅", VERIFIED: "🔵", DECLINED: "🔴", PENDING_OTP: "🟡", PENDING: "⏳" }[r.status] || "💳";
   const amtClass   = r.is_fraud && r.status === "DECLINED" ? "negative" : "positive";
   const date       = new Date(r.tx_datetime).toLocaleString();
+  const isPending  = r.status === "PENDING_OTP";
   return `
-    <div class="tx-item">
+    <div class="tx-item ${isPending ? "clickable" : ""}" ${isPending ? `onclick="resumeTransaction('${r.transaction_id}')"` : ""}>
       <div class="tx-item-icon">${statusIcon}</div>
       <div class="tx-item-body">
         <div class="tx-item-title">Terminal ${r.terminal_id} — ${r.status}</div>
         <div class="tx-item-meta">${date} ${r.scenario_name ? `| ${r.scenario_name}` : ""}</div>
+        ${isPending ? `<div class="tx-pending-hint">⏳ Tap to finish verifying before it times out</div>` : ""}
       </div>
       <div class="tx-item-amount ${amtClass}">$${parseFloat(r.tx_amount).toFixed(2)}</div>
     </div>
@@ -320,13 +322,11 @@ function showOtpOverlay(res) {
   document.getElementById("otp-meta").textContent =
     `Transaction: ${res.transaction_id?.slice(0, 8)}… | ${res.scenario || "Suspicious Activity"} | ${((res.fraud_probability ?? 0) * 100).toFixed(1)}% confidence`;
 
-  // Reset digits
   document.querySelectorAll(".otp-digit").forEach(d => d.value = "");
   document.querySelectorAll(".otp-digit")[0].focus();
   document.getElementById("otp-error").classList.remove("visible");
 
-  // Start 5-min countdown
-  startOtpTimer(300);
+  startOtpTimer(res.otp_expires_in || 40);   // was hardcoded 300
 }
 
 function initOtpInputs() {
@@ -434,10 +434,26 @@ async function submitOtp() {
 
 function declineOtp() {
   clearInterval(otpTimer);
-  pendingTxId = null;
+  const txId = pendingTxId;
   document.getElementById("otp-overlay").classList.add("hidden");
-  showError("tx-error", "Transaction cancelled. OTP was not verified.");
+  showError("tx-error", "Verification cancelled — this is NOT recorded as fraud. Reopen this transaction from your history below to finish verifying.");
+  pendingTxId = null;
+
+  if (txId) {
+    apiFetch("/api/transactions/otp-pending", "POST", { transaction_id: txId }, true).catch(() => {});
+  }
   loadHistory();
+}
+
+async function resumeTransaction(transactionId) {
+  try {
+    const res = await apiFetch("/api/transactions/resume", "POST", { transaction_id: transactionId }, true);
+    pendingTxId = res.transaction_id;
+    showOtpOverlay(res);
+  } catch (err) {
+    showError("tx-error", err.message || "Could not resume this transaction — it may already be resolved.");
+    loadHistory();
+  }
 }
 
 // ── Success Overlay ───────────────────────────────────────────────────────────

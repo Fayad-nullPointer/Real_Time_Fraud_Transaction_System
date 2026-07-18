@@ -318,6 +318,10 @@ class FraudDetectionPipeline:
         from the DB before scoring their next transaction. See
         `FraudFeatureEngineer.warm_start_customer`."""
         return self.feature_engineer.warm_start_customer(customer_id, history_df)
+    
+    def get_customer_debug_state(self, customer_id) -> dict:
+        """See FraudFeatureEngineer.get_debug_state."""
+        return self.feature_engineer.get_debug_state(customer_id)
 
     def is_warm(self, customer_id) -> bool:
         """True if this customer's realtime state already reflects real

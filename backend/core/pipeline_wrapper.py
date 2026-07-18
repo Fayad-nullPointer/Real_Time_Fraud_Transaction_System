@@ -121,3 +121,6 @@ def score_transaction(tx_dict: dict) -> dict:
         "top_reasons":      _rank_top_reasons(explanation),
         "explanation":      explanation,
     }
+
+def get_customer_state(customer_id) -> dict:
+    return get_pipeline().get_customer_debug_state(customer_id)

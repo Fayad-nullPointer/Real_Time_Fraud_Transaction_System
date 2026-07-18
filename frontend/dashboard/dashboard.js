@@ -439,6 +439,10 @@ function pushEvent(ev) {
       meta = `TX ${ev.transaction_id?.slice(0,8)}`;
       pushAlert(`🔴 ${reason}: TX ${ev.transaction_id?.slice(0,8)}`, "danger");
     }
+  } else if (ev.event === "OTP_PENDING") {
+      icon = "⏸️"; title = "Customer Paused Verification";
+      meta = `TX ${ev.transaction_id?.slice(0,8)} — still pending, not fraud`;
+      pushAlert(`⏸️ Customer paused OTP entry: TX ${ev.transaction_id?.slice(0,8)} — awaiting retry`, "warning");
   }
 
   div.innerHTML = `
@@ -867,6 +871,7 @@ async function openCustomerModal(customerId) {
   document.getElementById("cm-meta").textContent = "Loading…";
   document.getElementById("cm-stats").innerHTML = "";
   document.getElementById("cm-recent-list").innerHTML = "";
+  document.getElementById("cm-feature-state").innerHTML = "Loading…";
 
   try {
     const c = await apiFetch(`/api/dashboard/customers/${customerId}`);
@@ -889,6 +894,7 @@ async function openCustomerModal(customerId) {
     const recentList = document.getElementById("cm-recent-list");
     if (!c.recent_transactions.length) {
       recentList.innerHTML = `<div class="log-empty">No transactions yet.</div>`;
+      
     } else {
       recentList.innerHTML = c.recent_transactions.map(r => `
         <div class="cust-recent-item clickable ${r.is_fraud ? "is-fraud" : ""}"
@@ -899,6 +905,9 @@ async function openCustomerModal(customerId) {
         </div>
       `).join("");
     }
+
+    loadCustomerFeatureState(customerId);
+
   } catch (e) {
     document.getElementById("cm-meta").textContent = "Could not load this customer's profile.";
     console.warn("openCustomerModal error:", e);
@@ -952,16 +961,19 @@ function renderShapList(reasons) {
     return;
   }
 
-  const maxAbs = Math.max(...reasons.map(r => Math.abs(r.shap_value)), 1e-6);
+  const numeric = reasons.filter(r => typeof r.shap_value === "number");
+  const maxAbs = Math.max(...numeric.map(r => Math.abs(r.shap_value)), 1e-6);
 
   container.innerHTML = reasons.map(r => {
-    const isPos = r.shap_value >= 0;
-    const widthPct = Math.min(100, Math.round((Math.abs(r.shap_value) / maxAbs) * 50)); // half-track each side
+    const hasValue = typeof r.shap_value === "number";
+    const isPos = hasValue ? r.shap_value >= 0 : true;
+    const widthPct = hasValue ? Math.min(100, Math.round((Math.abs(r.shap_value) / maxAbs) * 50)) : 0;
+    const valueLabel = hasValue ? `${isPos ? "+" : ""}${r.shap_value.toFixed(4)}` : "N/A";
     return `
       <div class="shap-row">
         <div class="shap-row-top">
           <span class="shap-feature">${r.feature}<span class="shap-type-tag">${r.type}</span></span>
-          <span class="shap-value ${isPos ? "positive" : "negative"}">${isPos ? "+" : ""}${r.shap_value.toFixed(4)}</span>
+          <span class="shap-value ${isPos ? "positive" : "negative"}">${valueLabel}</span>
         </div>
         <div class="shap-bar-track">
           <span class="shap-bar-mid"></span>
@@ -971,6 +983,78 @@ function renderShapList(reasons) {
     `;
   }).join("");
 }
+
+
+async function loadCustomerFeatureState(customerId) {
+  const el = document.getElementById("cm-feature-state");
+  el.textContent = "Loading…";
+  try {
+    const s = await apiFetch(`/api/dashboard/customers/${customerId}/state`);
+    el.innerHTML = renderFeatureState(s);
+  } catch (e) {
+    el.innerHTML = `<div class="log-empty">Could not load live feature state.</div>`;
+    console.warn("loadCustomerFeatureState error:", e);
+  }
+}
+
+function renderFeatureState(s) {
+  const rt = s.realtime || {};
+  const p = s.profile || {};
+  const lags = rt.last_amounts_chronological || [];
+
+  const coldStartBanner = s.is_cold_start ? `
+    <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.25);
+                border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:0.78rem;color:#fbbf24;">
+      🟡 This customer is still cold-starting — the model is scoring them against
+      population-default stats, not their own history, until they complete
+      ${5 - (rt.cold_start_running_n ?? 0)} more real transaction(s).
+    </div>` : "";
+
+  return `
+    ${coldStartBanner}
+    <div class="cust-modal-stats" style="margin-bottom:14px;">
+      <div class="cust-stat">
+        <div class="cust-stat-label">Cold Start</div>
+        <div class="cust-stat-value" style="font-size:0.95rem">${s.is_cold_start ? "🟡 Yes" : "🟢 No"}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">Warm (has buffer)</div>
+        <div class="cust-stat-value" style="font-size:0.95rem">${s.is_warm ? "🟢 Yes" : "🔴 No"}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">tx_count_1h (approx)</div>
+        <div class="cust-stat-value">${rt.tx_count_1h_approx ?? 0}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">tx_count_4h (approx)</div>
+        <div class="cust-stat-value">${rt.tx_count_4h_approx ?? 0}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">Stored mean_amount</div>
+        <div class="cust-stat-value">${p.mean_amount != null ? "$" + p.mean_amount.toFixed(2) : "—"}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">Stored std_amount</div>
+        <div class="cust-stat-value">${p.std_amount != null ? "$" + p.std_amount.toFixed(2) : "—"}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">Spending Tier</div>
+        <div class="cust-stat-value" style="font-size:0.9rem">${s.spending_tier ?? "—"}</div>
+      </div>
+      <div class="cust-stat">
+        <div class="cust-stat-label">nb_terminals</div>
+        <div class="cust-stat-value">${p.nb_terminals ?? "—"}</div>
+      </div>
+    </div>
+    <div class="cust-stat-label" style="margin-bottom:6px;">Lag buffer (most recent first)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+      ${lags.length
+        ? [...lags].reverse().map((a, i) => `<span class="log-tag">lag${i + 1}: $${Number(a).toFixed(2)}</span>`).join("")
+        : `<span class="log-empty" style="padding:0;">empty — no buffered transactions yet</span>`}
+    </div>
+  `;
+}
+
 
 function closeTransactionModal() {
   document.getElementById("transaction-modal").classList.add("hidden");
