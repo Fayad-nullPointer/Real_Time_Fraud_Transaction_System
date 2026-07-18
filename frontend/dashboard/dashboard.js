@@ -961,18 +961,20 @@ function renderShapList(reasons) {
     return;
   }
 
-  const numeric = reasons.filter(r => typeof r.shap_value === "number");
+  const numeric = reasons.filter(r => Number.isFinite(r.shap_value));
   const maxAbs = Math.max(...numeric.map(r => Math.abs(r.shap_value)), 1e-6);
 
   container.innerHTML = reasons.map(r => {
-    const hasValue = typeof r.shap_value === "number";
+    const hasValue = Number.isFinite(r.shap_value);
     const isPos = hasValue ? r.shap_value >= 0 : true;
     const widthPct = hasValue ? Math.min(100, Math.round((Math.abs(r.shap_value) / maxAbs) * 50)) : 0;
-    const valueLabel = hasValue ? `${isPos ? "+" : ""}${r.shap_value.toFixed(4)}` : "N/A";
+    const valueLabel = hasValue
+      ? `${isPos ? "+" : ""}${r.shap_value.toFixed(4)}`
+      : (r.type === "otp" ? "Timed out" : "N/A");
     return `
       <div class="shap-row">
         <div class="shap-row-top">
-          <span class="shap-feature">${r.feature}<span class="shap-type-tag">${r.type}</span></span>
+          <span class="shap-feature">${escHtml(r.feature)}<span class="shap-type-tag">${escHtml(r.type)}</span></span>
           <span class="shap-value ${isPos ? "positive" : "negative"}">${valueLabel}</span>
         </div>
         <div class="shap-bar-track">

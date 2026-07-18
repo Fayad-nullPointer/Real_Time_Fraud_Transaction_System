@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db.postgres import apply_schema, close_db_pool
-from backend.core.pipeline_wrapper import load_pipeline
+from backend.core.pipeline_wrapper import load_pipeline, warm_start_pipeline
 from backend.routers import auth, transactions, terminals, dashboard
 
 
@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
     await apply_schema()
     print("[startup] Loading ML pipeline...")
     load_pipeline()
+    await warm_start_pipeline(hours=48)   # <-- new
     start_otp_expiry_sweeper()
     print("[startup] Ready.")
     yield

@@ -16,12 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.db.postgres import get_db_pool
-from backend.db.redis_client import (
-    count_customer_tx, count_terminal_distinct_customers,
-    count_terminal_tx, get_customer_lags,
-    get_redis, push_customer_lag, push_customer_tx_time,
-    push_terminal_event, store_otp, verify_otp,
-)
+from backend.db.redis_client import get_redis, store_otp, verify_otp
 from backend.core.ws_manager import ws_manager
 from backend.routers.auth import get_current_customer
 import asyncio
@@ -77,14 +72,6 @@ async def create_transaction(
     if not terminal:
         raise HTTPException(status_code=404, detail="Terminal not found or inactive.")
 
-    # Build raw velocity features from Redis
-    lags = await get_customer_lags(customer_id)
-    tx_count_1h = await count_customer_tx(customer_id, 3600)
-    tx_count_4h = await count_customer_tx(customer_id, 14400)
-    terminal_tx_1h = await count_terminal_tx(body.terminal_id, 3600)
-    terminal_tx_4h = await count_terminal_tx(body.terminal_id, 14400)
-    terminal_distinct_1h = await count_terminal_distinct_customers(body.terminal_id)
-
     # Build transaction dict for the ML pipeline
     tx_dict = {
         "TRANSACTION_ID": tx_id,
@@ -93,19 +80,14 @@ async def create_transaction(
         "TX_DATETIME":    now.strftime("%Y-%m-%d %H:%M:%S"),
         "TX_AMOUNT":      body.tx_amount,
         "PHONE_NUMBER":   customer["phone_number"],
-        # pre-computed velocity hints (pipeline will use its own state too)
-        "_redis_tx_count_1h":            tx_count_1h,
-        "_redis_tx_count_4h":            tx_count_4h,
-        "_redis_terminal_tx_count_1h":   terminal_tx_1h,
-        "_redis_terminal_tx_count_4h":   terminal_tx_4h,
-        "_redis_distinct_customers_1h":  terminal_distinct_1h,
-        "_redis_lags":                   lags,
     }
 
-    # Run ML inference (synchronous — runs in thread pool via FastAPI).
-    # Also returns "top_reasons": a compact, ranked list of the SHAP feature
-    # contributions behind this fraud_probability — see pipeline_wrapper.py.
-    result = score_transaction(tx_dict)
+    # Run ML inference (LightGBM + SHAP + a synchronous Twilio call on
+    # fraud) in a worker thread so it never blocks the event loop —
+    # other requests and the dashboard WebSocket keep flowing while this
+    # transaction scores.
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, score_transaction, tx_dict)
 
     result = {
         **result,
@@ -146,12 +128,6 @@ async def create_transaction(
             json.dumps(result.get("top_reasons", [])),
             otp_expires_at,
         )
-
-    # Update Redis velocity state (only for approved transactions)
-    if not result["is_fraud"]:
-        await push_customer_lag(customer_id, body.tx_amount)
-        await push_customer_tx_time(customer_id, tx_id, now.timestamp())
-        await push_terminal_event(body.terminal_id, customer_id, tx_id, now.timestamp())
 
     # Broadcast to dashboard WebSocket (top_reasons included so the live
     # event feed / logs view can show "why" without a follow-up fetch).
@@ -220,12 +196,6 @@ async def verify_transaction(
             "UPDATE transactions SET status = $1 WHERE transaction_id = $2",
             new_status, body.transaction_id,
         )
-
-    if otp_valid:
-        # Now update Redis velocity (transaction approved by user)
-        await push_customer_lag(customer_id, tx["tx_amount"])
-        await push_customer_tx_time(customer_id, body.transaction_id, tx["tx_datetime"].timestamp())
-        await push_terminal_event(tx["terminal_id"], customer_id, body.transaction_id, tx["tx_datetime"].timestamp())
 
     await ws_manager.broadcast({
         "event":          "OTP_RESULT",

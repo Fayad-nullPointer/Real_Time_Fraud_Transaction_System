@@ -103,6 +103,24 @@ FEATURE_COLS = [
 ]
 
 
+def _to_naive_ts(value) -> pd.Timestamp:
+    """
+    Normalize any incoming timestamp (naive string, tz-aware datetime from
+    asyncpg/Postgres, naive Timestamp from training CSVs, etc.) to a naive
+    pandas Timestamp in UTC wall-clock terms.
+
+    Without this, mixing tz-aware sources (e.g. warm-starting from a
+    TIMESTAMPTZ column) with tz-naive sources (e.g. live `TX_DATETIME`
+    strings built with `datetime.strftime`) crashes `ts - t` comparisons
+    with "Cannot subtract tz-naive and tz-aware datetime-like objects."
+    Every timestamp that enters `_customer_state` / `_terminal_state` must
+    go through here so all comparisons stay apples-to-apples.
+    """
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts
+
 @dataclass
 class _CustomerState:
     """Rolling, per-customer realtime state used for lag / velocity features."""
@@ -334,7 +352,7 @@ class FraudFeatureEngineer:
         if cust_hist.empty:
             return False
 
-        cust_hist["TX_DATETIME"] = pd.to_datetime(cust_hist["TX_DATETIME"])
+        cust_hist["TX_DATETIME"] = pd.to_datetime(cust_hist["TX_DATETIME"], utc=True).dt.tz_localize(None)
         cust_hist = cust_hist.sort_values("TX_DATETIME")
 
         for _, row in cust_hist.iterrows():
@@ -703,7 +721,7 @@ class FraudFeatureEngineer:
             raise RuntimeError("Feature engineer is not fitted / loaded.")
 
         cust_id, term_id = tx["CUSTOMER_ID"], tx["TERMINAL_ID"]
-        ts = pd.Timestamp(tx["TX_DATETIME"])
+        ts = _to_naive_ts(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
 
         if cust_id not in self.customer_profiles_.index:
@@ -805,7 +823,7 @@ class FraudFeatureEngineer:
         (so replay / re-scoring of the same event doesn't double-count)."""
         cust_id = tx["CUSTOMER_ID"]
         term_id = tx["TERMINAL_ID"]
-        ts = pd.Timestamp(tx["TX_DATETIME"])
+        ts = _to_naive_ts(tx["TX_DATETIME"])
         amount = float(tx["TX_AMOUNT"])
         state = self._customer_state[cust_id]
         state.last_amounts.append(amount)
