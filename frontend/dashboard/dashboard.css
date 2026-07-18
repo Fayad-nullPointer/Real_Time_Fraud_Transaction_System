@@ -583,3 +583,129 @@ body::before {
   .logs-toolbar { flex-direction: column; align-items: flex-start; }
   .log-search-wrap { max-width: 100%; }
 }
+
+/* ============================================================
+   Customers tab + customer profile modal
+   (append this block to the end of dashboard.css)
+   ============================================================ */
+
+/* ── Customers table ── */
+.customers-card { display: flex; flex-direction: column; }
+.customers-card .table-wrapper { max-height: 560px; }
+
+.cust-row { cursor: pointer; }
+.cust-row:hover td { background: rgba(99,102,241,0.08); }
+
+.cust-name-cell { display: flex; flex-direction: column; gap: 2px; }
+.cust-name-id { font-weight: 600; color: var(--text-primary); }
+.cust-name-phone { font-size: 0.72rem; color: var(--text-muted); }
+
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 100px;
+}
+.risk-pill .risk-dot { width: 7px; height: 7px; border-radius: 50%; }
+.risk-low    { background: rgba(34,197,94,0.12);  color: var(--success); }
+.risk-low    .risk-dot { background: var(--success); }
+.risk-medium { background: rgba(245,158,11,0.12); color: var(--warning); }
+.risk-medium .risk-dot { background: var(--warning); }
+.risk-high   { background: rgba(239,68,68,0.14);  color: var(--danger); }
+.risk-high   .risk-dot { background: var(--danger); }
+
+/* ── Customer profile modal ── */
+.customer-modal-card {
+  position: relative; z-index: 1;
+  max-width: 460px; width: 100%;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: rgba(15,18,28,0.97);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 26px 24px;
+  box-shadow: 0 32px 90px rgba(0,0,0,0.55);
+  animation: slideUp 0.25s ease;
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px; right: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 30px; height: 30px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+.modal-close:hover { background: rgba(239,68,68,0.15); color: var(--danger); border-color: rgba(239,68,68,0.3); }
+
+.cust-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding-right: 30px;
+}
+.cust-modal-avatar {
+  font-size: 2.2rem;
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  background: rgba(99,102,241,0.15);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.cust-modal-headtext { min-width: 0; }
+.cust-modal-id { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); }
+.cust-modal-meta { font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px; }
+
+.cust-modal-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.cust-stat {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.cust-stat-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.cust-stat-value { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); }
+.cust-stat.cust-stat-risk .cust-stat-value.risk-high   { color: var(--danger); }
+.cust-stat.cust-stat-risk .cust-stat-value.risk-medium { color: var(--warning); }
+.cust-stat.cust-stat-risk .cust-stat-value.risk-low    { color: var(--success); }
+
+.cust-modal-recent h4 {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.cust-recent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.025);
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+}
+.cust-recent-item.is-fraud { border-left: 3px solid var(--danger); }
+.cust-recent-item:not(.is-fraud) { border-left: 3px solid transparent; }
+.cust-recent-id { color: var(--text-secondary); }
+.cust-recent-amount { font-weight: 700; color: var(--text-primary); }
+.cust-recent-time { color: var(--text-muted); font-size: 0.72rem; }

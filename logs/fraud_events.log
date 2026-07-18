@@ -382,3 +382,7 @@
 {"timestamp": "2026-07-18 10:46:56,122", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
 {"timestamp": "2026-07-18 10:58:04,704", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
 {"timestamp": "2026-07-18 10:58:05,825", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-18 12:28:21,280", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-18 12:28:24,004", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}
+{"timestamp": "2026-07-18 12:48:15,711", "level": "INFO", "name": "fraud_pipeline", "message": "Loaded feature engineer and model bundle from D:\\ITI Materials\\Projects\\Real_Time_Fraud_Transaction_System\\models"}
+{"timestamp": "2026-07-18 12:48:16,913", "level": "INFO", "name": "fraud_pipeline", "message": "Explainability (SHAP / feature importance / PDP-ICE) ready."}

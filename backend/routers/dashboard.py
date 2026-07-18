@@ -7,6 +7,8 @@ GET  /api/dashboard/transactions – paginated transaction log for admin
 GET  /api/dashboard/system       – backend/model health info
 GET  /api/dashboard/fraud-map    – fraud-only transaction locations for map
 GET  /api/dashboard/logs         – parsed JSON fraud event log entries
+GET  /api/dashboard/customers    – per-customer summary (for the Customers tab)
+GET  /api/dashboard/customers/{customer_id} – full customer profile + recent txns
 """
 from __future__ import annotations
 
@@ -19,14 +21,46 @@ from pathlib import Path
 import psutil
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from backend.db.postgres import get_db_pool
 from backend.db.redis_client import get_redis
 from backend.core.ws_manager import ws_manager
 from backend.core.pipeline_wrapper import get_inference_time_ms
+from backend.core.geolocation import resolve_city_from_coords
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+def _compute_risk_score(avg_fraud_probability, confirmed_fraud_count, total_txns) -> int:
+    """
+    Blended 0-100 risk score for a customer:
+
+      50% average fraud probability  — the model's average confidence,
+                                        across every transaction, that it
+                                        looked like fraud.
+      50% confirmed-fraud rate       — the share of the customer's
+                                        transactions that were actually
+                                        DECLINED (OTP failed / timed out),
+                                        i.e. fraud the pipeline caught AND
+                                        the customer failed to verify.
+
+    Averaging model confidence alone rewards/punishes customers based only
+    on how "suspicious-looking" their transactions were, even if every one
+    of them was ultimately verified as legitimate. Blending in the
+    confirmed-fraud rate makes the score track real outcomes as well as
+    raw model confidence. Returns 0 for a customer with no transactions.
+    """
+    total_txns = total_txns or 0
+    avg_fraud_probability = float(avg_fraud_probability or 0.0)
+    confirmed_fraud_count = confirmed_fraud_count or 0
+
+    if total_txns == 0:
+        return 0
+
+    confirmed_fraud_rate = confirmed_fraud_count / total_txns
+    blended = 0.5 * avg_fraud_probability + 0.5 * confirmed_fraud_rate
+    return round(blended * 100)
 
 
 @router.get("/metrics")
@@ -60,6 +94,10 @@ async def get_metrics():
         active_terminals = await conn.fetchval(
             "SELECT COUNT(DISTINCT terminal_id) FROM transactions WHERE tx_datetime >= $1", today_start
         )
+
+        # All-time registered totals (independent of today's activity window)
+        registered_customers = await conn.fetchval("SELECT COUNT(*) FROM customers")
+        registered_terminals = await conn.fetchval("SELECT COUNT(*) FROM terminals")
 
         # Hourly buckets for charts
         hourly_volume = await conn.fetch(
@@ -117,6 +155,8 @@ async def get_metrics():
         "fraud_rate":         fraud_rate,
         "active_customers":   active_customers,
         "active_terminals":   active_terminals,
+        "registered_customers": registered_customers,
+        "registered_terminals": registered_terminals,
         "otp_funnel": {
             "fraud_predictions": otp_sent,
             "otp_sent":          otp_sent,
@@ -250,6 +290,148 @@ async def get_logs(limit: int = 200, level: str = ""):
         if len(entries) >= limit:
             break
     return entries
+
+
+@router.get("/customers")
+async def list_customers(limit: int = 200):
+    """
+    Per-customer summary row for the admin Customers tab:
+    Customer, Location, Txns, Avg amount, Risk score.
+
+    Risk score is the customer's average fraud_probability across all of
+    their transactions, expressed as 0-100 (higher = riskier).
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.customer_id,
+                c.phone_number,
+                c.full_name,
+                c.registration_lat,
+                c.registration_lon,
+                COUNT(t.transaction_id)                    AS total_txns,
+                COALESCE(AVG(t.tx_amount), 0)               AS avg_amount,
+                COALESCE(AVG(t.fraud_probability), 0)       AS avg_fraud_probability,
+                COUNT(*) FILTER (WHERE t.status = 'DECLINED') AS confirmed_fraud_count,
+                COUNT(DISTINCT t.terminal_id)                AS terminals_used
+            FROM customers c
+            LEFT JOIN transactions t ON t.customer_id = c.customer_id
+            GROUP BY c.customer_id
+            ORDER BY c.customer_id
+            LIMIT $1
+            """,
+            limit,
+        )
+
+    results = []
+    for r in rows:
+        location = await resolve_city_from_coords(r["registration_lat"], r["registration_lon"])
+        results.append({
+            "customer_id":    r["customer_id"],
+            "phone_number":   r["phone_number"],
+            "full_name":      r["full_name"],
+            "location":       location,
+            "lat":            float(r["registration_lat"]) if r["registration_lat"] is not None else None,
+            "lon":            float(r["registration_lon"]) if r["registration_lon"] is not None else None,
+            "total_txns":     r["total_txns"],
+            "avg_amount":     round(float(r["avg_amount"]), 2),
+            "terminals_used": r["terminals_used"],
+            "risk_score":     _compute_risk_score(
+                                  r["avg_fraud_probability"], r["confirmed_fraud_count"], r["total_txns"]
+                              ),
+        })
+    return results
+
+
+@router.get("/customers/{customer_id}")
+async def customer_profile(customer_id: int):
+    """
+    Full profile for one customer, for the Customers-tab detail modal:
+    contact info, location, mean/std transaction amount, txns/day,
+    terminals used, total txns, risk score, and the 5 most recent
+    transactions.
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        cust = await conn.fetchrow(
+            """
+            SELECT customer_id, phone_number, full_name,
+                   registration_lat, registration_lon
+            FROM customers WHERE customer_id = $1
+            """,
+            customer_id,
+        )
+        if cust is None:
+            raise HTTPException(status_code=404, detail="Customer not found.")
+
+        stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)                              AS total_txns,
+                COALESCE(AVG(tx_amount), 0)            AS mean_amount,
+                COALESCE(STDDEV_POP(tx_amount), 0)     AS std_amount,
+                COALESCE(AVG(fraud_probability), 0)    AS avg_fraud_probability,
+                COUNT(*) FILTER (WHERE status = 'DECLINED') AS confirmed_fraud_count,
+                COUNT(DISTINCT terminal_id)             AS terminals_used,
+                MIN(tx_datetime)                        AS first_tx,
+                MAX(tx_datetime)                        AS last_tx
+            FROM transactions
+            WHERE customer_id = $1
+            """,
+            customer_id,
+        )
+
+        recent_rows = await conn.fetch(
+            """
+            SELECT transaction_id, tx_amount, tx_datetime, is_fraud, status
+            FROM transactions
+            WHERE customer_id = $1
+            ORDER BY tx_datetime DESC
+            LIMIT 5
+            """,
+            customer_id,
+        )
+
+    total_txns = stats["total_txns"] or 0
+    first_tx, last_tx = stats["first_tx"], stats["last_tx"]
+    if first_tx and last_tx and total_txns:
+        days_span = max((last_tx - first_tx).total_seconds() / 86400.0, 1.0)
+        txns_per_day = round(total_txns / days_span, 1)
+    else:
+        txns_per_day = 0.0
+
+    location = await resolve_city_from_coords(cust["registration_lat"], cust["registration_lon"])
+
+    now = datetime.now(timezone.utc)
+    recent_transactions = []
+    for r in recent_rows:
+        tx_dt = r["tx_datetime"]
+        days_ago = max(int((now - tx_dt).total_seconds() // 86400), 0) if tx_dt else None
+        recent_transactions.append({
+            "transaction_id": r["transaction_id"],
+            "tx_amount":       float(r["tx_amount"]),
+            "days_ago":        days_ago,
+            "is_fraud":        r["is_fraud"],
+            "status":          r["status"],
+        })
+
+    return {
+        "customer_id":    cust["customer_id"],
+        "phone_number":   cust["phone_number"],
+        "full_name":      cust["full_name"],
+        "location":       location,
+        "mean_amount":    round(float(stats["mean_amount"]), 2),
+        "std_amount":     round(float(stats["std_amount"]), 2),
+        "txns_per_day":   txns_per_day,
+        "terminals_used": stats["terminals_used"] or 0,
+        "total_txns":     total_txns,
+        "risk_score":     _compute_risk_score(
+                              stats["avg_fraud_probability"], stats["confirmed_fraud_count"], total_txns
+                          ),
+        "recent_transactions": recent_transactions,
+    }
 
 
 @router.websocket("/ws")

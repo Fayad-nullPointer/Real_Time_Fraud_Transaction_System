@@ -14,6 +14,8 @@ let volumeChart, fraudTrendChart, scenariosChart, reasonsChart;
 let fraudMap, fraudMapLayer;
 let metricsCache = {};
 let activeTab = "overview";
+let alertsSeeded = false;
+let customersLoaded = false;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
@@ -22,9 +24,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   initFraudMap();
   connectWebSocket();
   await fetchAll();
+  await loadCustomers();
   setInterval(fetchAll, 30_000);
 
-  document.getElementById("btn-refresh").addEventListener("click", fetchAll);
+  document.getElementById("btn-refresh").addEventListener("click", () => {
+    fetchAll();
+    loadCustomers();
+  });
   setupNavTabs();
   setupLogFilters();
 });
@@ -58,10 +64,18 @@ async function fetchAll() {
     updateKPIs(metrics);
     updateCharts(metrics);
     updateFunnel(metrics.otp_funnel);
-    renderFraudTable(txList.filter(t => t.is_fraud).slice(0, 12));
+    const fraudTx = txList.filter(t => t.is_fraud);
+    renderFraudTable(fraudTx.slice(0, 12));
     populateLiveTable(txList.slice(0, MAX_LIVE_ROWS));
     updateSystemHealth(system);
     document.getElementById("last-updated").textContent = "Last updated: " + new Date().toLocaleTimeString();
+
+    // Seed the Alerts panel from already-recorded fraud transactions
+    // (only once — live events take over from here via the WebSocket).
+    if (!alertsSeeded) {
+      seedAlertsFromHistory(fraudTx);
+      alertsSeeded = true;
+    }
 
     // Refresh fraud map data
     refreshFraudMap();
@@ -87,6 +101,8 @@ function updateKPIs(d) {
   set("val-rate",      (d.fraud_rate ?? 0).toFixed(2) + "%");
   set("val-customers", d.active_customers?.toLocaleString() ?? "—");
   set("val-terminals", d.active_terminals?.toLocaleString() ?? "—");
+  set("val-reg-customers", d.registered_customers?.toLocaleString() ?? "—");
+  set("val-reg-terminals", d.registered_terminals?.toLocaleString() ?? "—");
 }
 
 function fmtMoney(n) {
@@ -348,6 +364,35 @@ function pushAlert(text, type = "warning") {
   list.prepend(div);
   while (list.children.length > MAX_ALERTS) list.removeChild(list.lastChild);
   alertCount++;
+  set("alert-count", alertCount);
+}
+
+// Populate the Alerts panel with fraudulent transactions that already exist
+// in the database (e.g. from before this browser tab was opened), oldest
+// first, so the panel reads top-to-bottom the same way live alerts would.
+function seedAlertsFromHistory(fraudTxList) {
+  const list = document.getElementById("alert-list");
+  if (!list || !fraudTxList || !fraudTxList.length) return;
+
+  const ordered = [...fraudTxList].sort(
+    (a, b) => new Date(a.tx_datetime) - new Date(b.tx_datetime)
+  );
+
+  ordered.forEach(tx => {
+    const t = new Date(tx.tx_datetime).toLocaleTimeString();
+    const shortId = (tx.transaction_id || "").slice(0, 8);
+    const pct = ((tx.fraud_probability ?? 0) * 100).toFixed(1);
+    const type = tx.status === "DECLINED" ? "danger" : "warning";
+    const text = `🚨 Fraud: TX ${shortId} — ${tx.scenario_name || "Unknown scenario"} (${pct}%) — ${tx.status}`;
+
+    const div = document.createElement("div");
+    div.className = `alert-item alert-${type}`;
+    div.innerHTML = `<span class="alert-time">${t}</span><span class="alert-text">${text}</span>`;
+    list.appendChild(div);
+    alertCount++;
+  });
+
+  while (list.children.length > MAX_ALERTS) list.removeChild(list.firstChild);
   set("alert-count", alertCount);
 }
 
@@ -664,6 +709,99 @@ function connectWebSocket() {
   };
 
   connect();
+}
+
+// ── Customers Tab ─────────────────────────────────────────────────────────────
+async function loadCustomers() {
+  const tbody = document.getElementById("customers-tbody");
+  if (!tbody) return;
+  try {
+    const customers = await apiFetch("/api/dashboard/customers?limit=200");
+    renderCustomersTable(customers);
+    customersLoaded = true;
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="log-error">⚠ Could not load customers.</td></tr>`;
+    console.warn("loadCustomers error:", e);
+  }
+}
+
+function renderCustomersTable(customers) {
+  const tbody = document.getElementById("customers-tbody");
+  if (!tbody) return;
+
+  if (!customers.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="log-empty">No registered customers yet.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = customers.map(c => `
+    <tr class="cust-row" onclick="openCustomerModal(${c.customer_id})">
+      <td>
+        <div class="cust-name-cell">
+          <span class="cust-name-id">#${c.customer_id}${c.full_name ? " · " + c.full_name : ""}</span>
+          <span class="cust-name-phone">${c.phone_number ?? ""}</span>
+        </div>
+      </td>
+      <td>${c.location || "Unknown"}</td>
+      <td>${c.total_txns?.toLocaleString() ?? 0}</td>
+      <td>$${(c.avg_amount ?? 0).toFixed(2)}</td>
+      <td>${riskPill(c.risk_score)}</td>
+    </tr>
+  `).join("");
+}
+
+function riskPill(score) {
+  const s = score ?? 0;
+  const level = s >= 70 ? "high" : s >= 35 ? "medium" : "low";
+  return `<span class="risk-pill risk-${level}"><span class="risk-dot"></span>${s}</span>`;
+}
+
+async function openCustomerModal(customerId) {
+  const modal = document.getElementById("customer-modal");
+  modal.classList.remove("hidden");
+  document.getElementById("cm-id").textContent = `Customer #${customerId}`;
+  document.getElementById("cm-meta").textContent = "Loading…";
+  document.getElementById("cm-stats").innerHTML = "";
+  document.getElementById("cm-recent-list").innerHTML = "";
+
+  try {
+    const c = await apiFetch(`/api/dashboard/customers/${customerId}`);
+
+    document.getElementById("cm-id").textContent =
+      `Customer #${c.customer_id}${c.full_name ? " · " + c.full_name : ""}`;
+    document.getElementById("cm-meta").textContent =
+      `${c.phone_number ?? "—"} · ${c.location || "Unknown"}`;
+
+    const riskLevel = c.risk_score >= 70 ? "high" : c.risk_score >= 35 ? "medium" : "low";
+    document.getElementById("cm-stats").innerHTML = `
+      <div class="cust-stat"><div class="cust-stat-label">Mean Amount</div><div class="cust-stat-value">$${c.mean_amount.toFixed(2)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Std Deviation</div><div class="cust-stat-value">$${c.std_amount.toFixed(2)}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Txns / Day</div><div class="cust-stat-value">${c.txns_per_day}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Terminals Used</div><div class="cust-stat-value">${c.terminals_used}</div></div>
+      <div class="cust-stat"><div class="cust-stat-label">Total Txns</div><div class="cust-stat-value">${c.total_txns.toLocaleString()}</div></div>
+      <div class="cust-stat cust-stat-risk"><div class="cust-stat-label">Risk Score</div><div class="cust-stat-value risk-${riskLevel}">${c.risk_score}</div></div>
+    `;
+
+    const recentList = document.getElementById("cm-recent-list");
+    if (!c.recent_transactions.length) {
+      recentList.innerHTML = `<div class="log-empty">No transactions yet.</div>`;
+    } else {
+      recentList.innerHTML = c.recent_transactions.map(r => `
+        <div class="cust-recent-item ${r.is_fraud ? "is-fraud" : ""}">
+          <span class="cust-recent-id">TX-${(r.transaction_id || "").toString().slice(0, 6)}</span>
+          <span class="cust-recent-amount">$${r.tx_amount.toFixed(2)}</span>
+          <span class="cust-recent-time">${r.days_ago}d ago</span>
+        </div>
+      `).join("");
+    }
+  } catch (e) {
+    document.getElementById("cm-meta").textContent = "Could not load this customer's profile.";
+    console.warn("openCustomerModal error:", e);
+  }
+}
+
+function closeCustomerModal() {
+  document.getElementById("customer-modal").classList.add("hidden");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
