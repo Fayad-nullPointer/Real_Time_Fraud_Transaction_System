@@ -20,6 +20,9 @@ from backend.db.redis_client import check_redis_connection
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[startup] Clearing real-time CSV transactions log...")
+    from backend.db.realtime_csv import clear_csv
+    clear_csv()
     print("[startup] Checking Redis status...")
     await check_redis_connection()
     print("[startup] Applying DB schema...")

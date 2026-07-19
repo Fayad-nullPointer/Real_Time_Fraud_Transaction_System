@@ -38,6 +38,26 @@ def init_csv():
                 ])
 
 
+def clear_csv():
+    """Clear the CSV file and write headers fresh."""
+    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CSV_LOCK:
+        with open(CSV_PATH, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "TRANSACTION_ID",
+                "TX_DATETIME",
+                "CUSTOMER_ID",
+                "TERMINAL_ID",
+                "TX_AMOUNT",
+                "TX_TIME_SECONDS",
+                "TX_TIME_DAYS",
+                "TX_FRAUD",
+                "TX_FRAUD_SCENARIO"
+            ])
+        print(f"[csv] Cleared realtime transactions log at {CSV_PATH}")
+
+
 def _parse_datetime(dt_str: str) -> datetime:
     try:
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
