@@ -199,3 +199,21 @@ async def apply_schema() -> None:
         async with pool.acquire() as conn:
             await conn.execute(sql)
         print("[postgres] PostgreSQL schema applied successfully.")
+
+    # Seed default admin user (ID 100000, password '1234') if database has no customers
+    from backend.core.security import hash_password
+    async with pool.acquire() as conn:
+        try:
+            count_row = await conn.fetchrow("SELECT COUNT(*) as count FROM customers")
+            if count_row and count_row["count"] == 0:
+                pw_hash = hash_password("1234")
+                await conn.execute(
+                    """
+                    INSERT INTO customers (customer_id, phone_number, password_hash, full_name, role)
+                    VALUES (100000, '+201011216969', $1, 'System Admin', 'admin')
+                    """,
+                    pw_hash
+                )
+                print("[postgres/sqlite] Seeded default admin user: ID=100000, Password=1234")
+        except Exception as e:
+            print(f"[postgres/sqlite] Warning: Failed to seed default admin: {e}")

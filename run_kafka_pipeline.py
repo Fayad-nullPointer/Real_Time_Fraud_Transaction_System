@@ -318,6 +318,20 @@ def run_consumer(topic: str, dlq_topic: str, explain: bool, interactive: bool, m
             dlq_producer.send(dlq_topic, {**tx, "error": f"Missing required columns: {missing_cols}"})
             continue
 
+        # Forward transaction to running GUI backend if available
+        import requests
+        try:
+            payload = {
+                "transaction_id": str(tx.get("TRANSACTION_ID")),
+                "customer_id": int(tx.get("CUSTOMER_ID")),
+                "terminal_id": int(tx.get("TERMINAL_ID")),
+                "tx_amount": float(tx.get("TX_AMOUNT")),
+                "tx_datetime": str(tx.get("TX_DATETIME")),
+            }
+            requests.post("http://localhost:8008/api/transactions/simulate", json=payload, timeout=1.0)
+        except Exception:
+            pass
+
         # 3. Model Inference & XAI
         try:
             if explain:
