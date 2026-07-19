@@ -57,6 +57,7 @@
       <a href="#customers" class="nav-item" id="nav-customers"><span class="nav-icon">🧑‍🤝‍🧑</span><span>Customers</span></a>
       <a href="#system" class="nav-item" id="nav-system"><span class="nav-icon">⚙️</span><span>System</span></a>
       <a href="#logs" class="nav-item" id="nav-logs" onclick="loadLogs()"><span class="nav-icon">📋</span><span>Logs</span></a>
+      <a href="#reports-section" class="nav-item" id="nav-reports" onclick="loadReports()"><span class="nav-icon">🚨</span><span>Customer Reports</span></a>
     </nav>
     <div class="sidebar-footer">
       <div class="connection-badge" id="ws-badge">
@@ -369,6 +370,34 @@
         <!-- Log entries -->
         <div class="log-entries" id="log-entries">
           <div class="log-empty">Click "Logs" in the sidebar to load entries.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 9. Customer Reports ── -->
+    <section class="section" id="reports-section">
+      <div class="card reports-card">
+        <div class="card-header">
+          <span class="card-title">🚨 Customer Security Reports</span>
+          <span class="card-sub">Real-time alerts, chargebacks, and OTP verification failures</span>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table" id="reports-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Customer ID</th>
+                <th>Terminal ID</th>
+                <th>Amount</th>
+                <th>Reported Scenario</th>
+                <th>Status</th>
+                <th>Customer Statement</th>
+              </tr>
+            </thead>
+            <tbody id="reports-tbody">
+              <tr><td colspan="7" class="log-empty">Click "Customer Reports" in the sidebar to load.</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
