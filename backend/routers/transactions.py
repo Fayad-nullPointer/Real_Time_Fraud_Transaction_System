@@ -804,7 +804,6 @@ async def simulate_transaction(body: SimulateTxRequest):
     otp_expires_at = None
     if result["is_fraud"]:
         # Standard OTP expires at now + 40s
-        from datetime import datetime, timedelta, timezone
         otp_expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
 
     # 4. Insert into database
