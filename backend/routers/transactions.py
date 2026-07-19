@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from backend.db.realtime_csv import append_transaction, update_transaction_label, retro_propagate_skimming
 
 from logger import get_logger
-from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction
+from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction, lookup_ground_truth
 
 logger = get_logger("transactions")
 
@@ -101,7 +101,38 @@ async def create_transaction(
         ),
     }
 
+    # Look up ground truth from synthetic_fraud_transactions.csv
+    gt_fraud, gt_scenario = lookup_ground_truth(customer_id, body.terminal_id, body.tx_amount)
+
     initial_status = "PENDING_OTP" if result["is_fraud"] else "APPROVED"
+    final_is_fraud = result["is_fraud"]
+    final_scenario_id = result["scenario_id"]
+    final_scenario_name = result["scenario_name"]
+
+    # False Negative (Customer Feedback Loop triggered on ground truth matching)
+    if not result["is_fraud"] and gt_fraud == 1:
+        initial_status = "REPORTED_FRAUD"
+        final_is_fraud = True
+        final_scenario_id = gt_scenario if gt_scenario > 0 else 2
+        final_scenario_name = {1: "Large Amount", 2: "Terminal Skimming", 3: "Credential Takeover"}.get(final_scenario_id, "Terminal Skimming")
+
+        logger.warning(
+            f"[bold yellow][FEEDBACK] Customer {customer_id} noticed unauthorized activity from Terminal {body.terminal_id} and filed a report.[/bold yellow]",
+            extra={
+                "event_type": "CUSTOMER_FEEDBACK",
+                "customer_id": customer_id,
+                "terminal_id": body.terminal_id,
+                "transaction_id": tx_id
+            }
+        )
+
+        try:
+            pipeline = get_pipeline()
+            pipeline.compromise_terminal(body.terminal_id)
+            compromise_start = now.strftime("%Y-%m-%d %H:%M:%S")
+            retro_propagate_skimming(body.terminal_id, compromise_start)
+        except Exception as e:
+            logger.error(f"Failed to compromise terminal and retro-propagate on ground truth match: {e}")
 
     otp_expires_at = (
         datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
@@ -123,8 +154,8 @@ async def create_transaction(
             """,
             tx_id, customer_id, body.terminal_id, body.tx_amount, now,
             body.lat, body.lon,
-            result["is_fraud"], result["fraud_probability"],
-            result["scenario_id"], result["scenario_name"],
+            final_is_fraud, result["fraud_probability"],
+            final_scenario_id, final_scenario_name,
             result["top_reason"], initial_status,
             json.dumps(result.get("top_reasons", [])),
             otp_expires_at,
@@ -133,8 +164,8 @@ async def create_transaction(
     # Append to realtime transactions CSV file for retraining
     append_transaction(
         tx_dict,
-        is_fraud=result["is_fraud"],
-        scenario_id=result["scenario_id"]
+        is_fraud=final_is_fraud,
+        scenario_id=final_scenario_id
     )
 
     # Broadcast to dashboard WebSocket (top_reasons included so the live
@@ -146,8 +177,8 @@ async def create_transaction(
         "terminal_id":        body.terminal_id,
         "amount":             body.tx_amount,
         "fraud_probability":  result["fraud_probability"],
-        "is_fraud":           result["is_fraud"],
-        "scenario_name":      result["scenario_name"],
+        "is_fraud":           final_is_fraud,
+        "scenario_name":      final_scenario_name,
         "top_reason":         result["top_reason"],
         "top_reasons":        result.get("top_reasons", []),
         "status":             initial_status,

@@ -169,38 +169,17 @@ function txItem(r) {
   const amtClass   = (r.is_fraud || r.status === "REPORTED_FRAUD") && r.status !== "APPROVED" && r.status !== "VERIFIED" ? "negative" : "positive";
   const date       = new Date(r.tx_datetime).toLocaleString();
   const isPending  = r.status === "PENDING_OTP";
-  const canReport  = r.status === "APPROVED" || r.status === "VERIFIED";
-  const reportBtn  = canReport ? `
-    <button class="btn-report-fraud" onclick="event.stopPropagation(); reportFraud('${r.transaction_id}')" 
-      style="margin-left: 10px; padding: 2px 6px; background: #ef4444; color: white; border: none; border-radius: 4px; font-size: 0.7rem; font-weight: 600; cursor: pointer; transition: background 0.2s;">
-      Report Fraud
-    </button>
-  ` : "";
-
   return `
     <div class="tx-item ${isPending ? "clickable" : ""}" ${isPending ? `onclick="resumeTransaction('${r.transaction_id}')"` : ""}>
       <div class="tx-item-icon">${statusIcon}</div>
       <div class="tx-item-body">
-        <div class="tx-item-title">Terminal ${r.terminal_id} — ${r.status} ${reportBtn}</div>
+        <div class="tx-item-title">Terminal ${r.terminal_id} — ${r.status}</div>
         <div class="tx-item-meta">${date} ${r.scenario_name ? `| ${r.scenario_name}` : ""}</div>
         ${isPending ? `<div class="tx-pending-hint">⏳ Tap to finish verifying before it times out</div>` : ""}
       </div>
       <div class="tx-item-amount ${amtClass}">$${parseFloat(r.tx_amount).toFixed(2)}</div>
     </div>
   `;
-}
-
-async function reportFraud(txId) {
-  if (!confirm("Are you sure you want to report this transaction as unauthorized/fraud? This will blacklist the terminal and trigger security investigations.")) {
-    return;
-  }
-  try {
-    await apiFetch("/api/transactions/report-fraud", "POST", { transaction_id: txId }, true);
-    showSuccess("Fraud reported successfully! 🚨 The terminal has been blacklisted.");
-    loadHistory();
-  } catch (err) {
-    showError("tx-error", err.message || "Failed to report fraud.");
-  }
 }
 
 // ── Terminal Map ──────────────────────────────────────────────────────────────

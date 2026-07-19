@@ -26,9 +26,10 @@ from scripts.fraud_pipeline import FraudDetectionPipeline
 _pipeline: Optional[FraudDetectionPipeline] = None
 _load_time_ms: float = 0.0
 _inference_time_ms: float = 0.0
+_fraud_dict: dict = {}
 
 def load_pipeline() -> None:
-    global _pipeline, _load_time_ms
+    global _pipeline, _load_time_ms, _fraud_dict
     t0 = time.perf_counter()
     models_dir = ROOT / "models"
     _pipeline = FraudDetectionPipeline.from_artifacts(
@@ -38,6 +39,30 @@ def load_pipeline() -> None:
     )
     _load_time_ms = (time.perf_counter() - t0) * 1000
     print(f"[pipeline] Loaded in {_load_time_ms:.1f} ms")
+
+    # Load fraud dictionary for ground truth matching
+    csv_path = ROOT / "data" / "synthetic_fraud_transactions.csv"
+    if not csv_path.exists():
+        csv_path = ROOT.parent / "data" / "synthetic_fraud_transactions.csv"
+    if csv_path.exists():
+        print("[pipeline] Loading fraud cases for ground truth matching...")
+        try:
+            df = pd.read_csv(csv_path)
+            fraud_df = df[df["TX_FRAUD"] == 1]
+            for _, row in fraud_df.iterrows():
+                key = (int(row["CUSTOMER_ID"]), int(row["TERMINAL_ID"]), round(float(row["TX_AMOUNT"]), 2))
+                _fraud_dict[key] = int(row.get("TX_FRAUD_SCENARIO", 0))
+            print(f"[pipeline] Loaded {len(_fraud_dict)} fraud cases into memory.")
+        except Exception as e:
+            print(f"[pipeline] Warning: Failed to load fraud cases from CSV: {e}")
+
+
+def lookup_ground_truth(customer_id: int, terminal_id: int, amount: float) -> tuple[int, int]:
+    key = (int(customer_id), int(terminal_id), round(float(amount), 2))
+    scenario_id = _fraud_dict.get(key)
+    if scenario_id is not None:
+        return 1, scenario_id
+    return 0, 0
 
 
 async def warm_start_pipeline(hours: int = 48) -> dict:
