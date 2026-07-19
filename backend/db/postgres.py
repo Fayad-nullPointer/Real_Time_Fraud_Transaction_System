@@ -92,6 +92,15 @@ class SQLitePool:
 
 def _pg_to_sqlite_query(sql: str) -> str:
     """Convert PostgreSQL parameterized parameters and syntax to SQLite."""
+    # Convert PG interval subtraction NOW() - ($1 || ' hours')::interval to SQLite datetime syntax
+    sql = re.sub(
+        r"NOW\(\)\s*-\s*\((.*?)\s*\|\|\s*' hours'\)::interval",
+        r"datetime('now', '-' || \1 || ' hours')",
+        sql,
+        flags=re.IGNORECASE
+    )
+    # Convert NOW() to datetime('now')
+    sql = re.sub(r'\bNOW\(\)', "datetime('now')", sql, flags=re.IGNORECASE)
     # Convert $1, $2 parameters to ?
     sql = re.sub(r'\$\d+', '?', sql)
     # Convert ILIKE to case-insensitive LIKE
