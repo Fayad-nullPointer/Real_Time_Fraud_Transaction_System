@@ -126,13 +126,23 @@ async def create_transaction(
             }
         )
 
-        try:
-            pipeline = get_pipeline()
-            pipeline.compromise_terminal(body.terminal_id)
-            compromise_start = now.strftime("%Y-%m-%d %H:%M:%S")
-            retro_propagate_skimming(body.terminal_id, compromise_start)
-        except Exception as e:
-            logger.error(f"Failed to compromise terminal and retro-propagate on ground truth match: {e}")
+        if final_scenario_id == 2:
+            try:
+                pipeline = get_pipeline()
+                pipeline.compromise_terminal(body.terminal_id)
+                compromise_start = now.strftime("%Y-%m-%d %H:%M:%S")
+                retro_propagate_skimming(body.terminal_id, compromise_start)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE transactions
+                        SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                        WHERE terminal_id = $1 AND tx_datetime >= $2
+                        """,
+                        body.terminal_id, now
+                    )
+            except Exception as e:
+                logger.error(f"Failed to compromise terminal and retro-propagate on ground truth match: {e}")
 
     otp_expires_at = (
         datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
