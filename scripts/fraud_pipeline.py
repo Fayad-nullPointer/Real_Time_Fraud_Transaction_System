@@ -54,7 +54,7 @@ from explainability import FraudModelExplainer
 from feature_engineering import FEATURE_COLS
 from twilio_notifier import WhatsAppNotifier
 
-from logger import get_logger
+from scripts.logger import get_logger
 logger = get_logger("fraud_pipeline")
 
 
