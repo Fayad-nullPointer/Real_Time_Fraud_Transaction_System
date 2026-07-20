@@ -174,6 +174,21 @@ def main():
     customer_df = pd.read_csv(data_dir / "customer_profiles.csv")
     terminal_df = pd.read_csv(data_dir / "terminal_profiles.csv")
     tx_df = pd.read_csv(data_dir / "synthetic_fraud_transactions.csv")
+
+    realtime_path = data_dir / "realtime_transactions.csv"
+    if realtime_path.exists():
+        print(f"Loading and appending realtime logged transactions from {realtime_path}...")
+        realtime_df = pd.read_csv(realtime_path)
+        realtime_df["CUSTOMER_ID"] = realtime_df["CUSTOMER_ID"].astype(int)
+        realtime_df["TERMINAL_ID"] = realtime_df["TERMINAL_ID"].astype(int)
+        realtime_df["TX_AMOUNT"] = realtime_df["TX_AMOUNT"].astype(float)
+        realtime_df["TX_TIME_SECONDS"] = realtime_df["TX_TIME_SECONDS"].astype(int)
+        realtime_df["TX_TIME_DAYS"] = realtime_df["TX_TIME_DAYS"].astype(int)
+        realtime_df["TX_FRAUD"] = realtime_df["TX_FRAUD"].astype(int)
+        realtime_df["TX_FRAUD_SCENARIO"] = realtime_df["TX_FRAUD_SCENARIO"].astype(int)
+        
+        tx_df = pd.concat([tx_df, realtime_df], ignore_index=True)
+
     tx_df["TX_DATETIME"] = pd.to_datetime(tx_df["TX_DATETIME"])
 
     print("Fitting feature engineer (learns peer groups, terminal risk stats, "

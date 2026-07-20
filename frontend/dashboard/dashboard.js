@@ -113,11 +113,13 @@ async function initDashboard() {
   connectWebSocket();
   await fetchAll();
   await loadCustomers();
+  await loadReports();
   setInterval(fetchAll, 30_000);
 
   document.getElementById("btn-refresh").addEventListener("click", () => {
     fetchAll();
     loadCustomers();
+    loadReports();
   });
   setupNavTabs();
   setupLogFilters();
@@ -669,6 +671,37 @@ function setupLogFilters() {
     searchBox.addEventListener("input", () => filterLogDisplay(searchBox.value));
   }
 }
+
+async function loadReports() {
+  const tbody = document.getElementById("reports-tbody");
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:2rem;color:#94a3b8">Loading reports...</td></tr>`;
+  try {
+    const data = await apiFetch("/api/dashboard/reports");
+    if (!data.length) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:2rem;color:#94a3b8">No customer reports recorded yet.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.map(r => {
+      const date = new Date(r.timestamp).toLocaleString();
+      const statusClass = r.status === "REPORTED_FRAUD" ? "badge-red" : "badge-red";
+      return `
+        <tr>
+          <td>${date}</td>
+          <td><strong>${r.customer_id}</strong></td>
+          <td>Terminal ${r.terminal_id}</td>
+          <td>$${r.amount.toFixed(2)}</td>
+          <td><span class="sys-badge badge-blue">${r.scenario}</span></td>
+          <td><span class="sys-badge ${statusClass}">${r.status}</span></td>
+          <td style="color:#cbd5e1;font-size:0.85rem;max-width:300px;white-space:normal;">${r.customer_statement}</td>
+        </tr>
+      `;
+    }).join("");
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:2rem;color:#ef4444">Error: ${err.message}</td></tr>`;
+  }
+}
+
 
 async function loadLogs() {
   const container = document.getElementById("log-entries");

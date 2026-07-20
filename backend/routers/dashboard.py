@@ -516,6 +516,46 @@ async def customer_profile(customer_id: int, _: dict = Depends(get_current_admin
     }
 
 
+@router.get("/reports")
+async def list_customer_reports(_: dict = Depends(get_current_admin)):
+    """Get all customer reports (unauthorized reports and OTP declines)."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
+                   scenario_id, scenario_name, status, top_reason
+            FROM transactions
+            WHERE status IN ('REPORTED_FRAUD', 'DECLINED')
+            ORDER BY tx_datetime DESC
+            """
+        )
+
+    reports = []
+    for r in rows:
+        status = r["status"]
+        scenario = r["scenario_name"] or "Suspicious Charge"
+
+        if status == 'REPORTED_FRAUD':
+            msg = f"Reported unauthorized activity. Customer says: 'I did not authorize this transaction. I suspect my card was skimmed at Terminal {r['terminal_id']}.'"
+        elif r["top_reason"] == 'OTP_NOT_ENTERED':
+            msg = f"OTP Verification Timed Out. Transaction auto-declined. Customer failed to enter verification code within the 40-second safety window."
+        else:
+            msg = f"OTP Verification Failed. Customer entered incorrect validation code. Suspicious attempt blocked."
+
+        reports.append({
+            "transaction_id": r["transaction_id"],
+            "customer_id": r["customer_id"],
+            "terminal_id": r["terminal_id"],
+            "amount": float(r["tx_amount"]),
+            "scenario": scenario,
+            "status": status,
+            "timestamp": r["tx_datetime"].isoformat(),
+            "customer_statement": msg
+        })
+    return reports
+
+
 @router.websocket("/ws")
 async def dashboard_ws(ws: WebSocket, token: str | None = Query(default=None)):
     """

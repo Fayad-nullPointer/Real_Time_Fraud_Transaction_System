@@ -21,9 +21,10 @@ from backend.core.ws_manager import ws_manager
 from backend.routers.auth import get_current_customer
 import asyncio
 from datetime import datetime, timedelta, timezone
+from backend.db.realtime_csv import append_transaction, update_transaction_label, retro_propagate_skimming
 
 from logger import get_logger
-from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction
+from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction, lookup_ground_truth
 
 logger = get_logger("transactions")
 
@@ -44,6 +45,14 @@ class CreateTxRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     transaction_id: str
     otp_code: str
+
+
+class SimulateTxRequest(BaseModel):
+    transaction_id: str | int
+    customer_id: int
+    terminal_id: int
+    tx_amount: float
+    tx_datetime: str
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -100,7 +109,48 @@ async def create_transaction(
         ),
     }
 
+    # Look up ground truth from synthetic_fraud_transactions.csv
+    gt_fraud, gt_scenario = lookup_ground_truth(customer_id, body.terminal_id, body.tx_amount)
+
     initial_status = "PENDING_OTP" if result["is_fraud"] else "APPROVED"
+    final_is_fraud = result["is_fraud"]
+    final_scenario_id = result["scenario_id"]
+    final_scenario_name = result["scenario_name"]
+
+    # False Negative (Customer Feedback Loop triggered on ground truth matching)
+    if not result["is_fraud"] and gt_fraud == 1:
+        initial_status = "REPORTED_FRAUD"
+        final_is_fraud = True
+        final_scenario_id = gt_scenario if gt_scenario > 0 else 2
+        final_scenario_name = {1: "Large Amount", 2: "Terminal Skimming", 3: "Credential Takeover"}.get(final_scenario_id, "Terminal Skimming")
+
+        logger.warning(
+            f"[bold yellow][FEEDBACK] Customer {customer_id} noticed unauthorized activity from Terminal {body.terminal_id} and filed a report.[/bold yellow]",
+            extra={
+                "event_type": "CUSTOMER_FEEDBACK",
+                "customer_id": customer_id,
+                "terminal_id": body.terminal_id,
+                "transaction_id": tx_id
+            }
+        )
+
+        if final_scenario_id == 2:
+            try:
+                pipeline = get_pipeline()
+                pipeline.compromise_terminal(body.terminal_id)
+                compromise_start = now.strftime("%Y-%m-%d %H:%M:%S")
+                retro_propagate_skimming(body.terminal_id, compromise_start)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE transactions
+                        SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                        WHERE terminal_id = $1 AND tx_datetime >= $2
+                        """,
+                        body.terminal_id, now
+                    )
+            except Exception as e:
+                logger.error(f"Failed to compromise terminal and retro-propagate on ground truth match: {e}")
 
     otp_expires_at = (
         datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
@@ -122,12 +172,19 @@ async def create_transaction(
             """,
             tx_id, customer_id, body.terminal_id, body.tx_amount, now,
             body.lat, body.lon,
-            result["is_fraud"], result["fraud_probability"],
-            result["scenario_id"], result["scenario_name"],
+            final_is_fraud, result["fraud_probability"],
+            final_scenario_id, final_scenario_name,
             result["top_reason"], initial_status,
             json.dumps(result.get("top_reasons", [])),
             otp_expires_at,
         )
+
+    # Append to realtime transactions CSV file for retraining
+    append_transaction(
+        tx_dict,
+        is_fraud=final_is_fraud,
+        scenario_id=final_scenario_id
+    )
 
     # Broadcast to dashboard WebSocket (top_reasons included so the live
     # event feed / logs view can show "why" without a follow-up fetch).
@@ -138,8 +195,8 @@ async def create_transaction(
         "terminal_id":        body.terminal_id,
         "amount":             body.tx_amount,
         "fraud_probability":  result["fraud_probability"],
-        "is_fraud":           result["is_fraud"],
-        "scenario_name":      result["scenario_name"],
+        "is_fraud":           final_is_fraud,
+        "scenario_name":      final_scenario_name,
         "top_reason":         result["top_reason"],
         "top_reasons":        result.get("top_reasons", []),
         "status":             initial_status,
@@ -176,7 +233,7 @@ async def verify_transaction(
     # Validate ownership
     async with pool.acquire() as conn:
         tx = await conn.fetchrow(
-            "SELECT customer_id, terminal_id, tx_amount, tx_datetime, status FROM transactions WHERE transaction_id = $1",
+            "SELECT customer_id, terminal_id, tx_amount, tx_datetime, status, scenario_id FROM transactions WHERE transaction_id = $1",
             body.transaction_id,
         )
 
@@ -196,6 +253,30 @@ async def verify_transaction(
             "UPDATE transactions SET status = $1 WHERE transaction_id = $2",
             new_status, body.transaction_id,
         )
+
+    # Update CSV label
+    is_fraud = not otp_valid
+    scenario_id = tx["scenario_id"] if not otp_valid else 0
+    update_transaction_label(body.transaction_id, is_fraud=is_fraud, scenario_id=scenario_id)
+
+    # If declined and scenario is 2 (Terminal Skimming), blacklist and retro-propagate
+    if not otp_valid and tx["scenario_id"] == 2:
+        try:
+            pipeline = get_pipeline()
+            pipeline.compromise_terminal(tx["terminal_id"])
+            compromise_start = tx["tx_datetime"].strftime("%Y-%m-%d %H:%M:%S")
+            retro_propagate_skimming(tx["terminal_id"], compromise_start)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE transactions
+                    SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                    WHERE terminal_id = $1 AND tx_datetime >= $2
+                    """,
+                    tx["terminal_id"], tx["tx_datetime"]
+                )
+        except Exception as e:
+            logger.error(f"Failed to compromise terminal and retro-propagate: {e}")
 
     await ws_manager.broadcast({
         "event":          "OTP_RESULT",
@@ -470,7 +551,7 @@ async def decline_transaction(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         tx = await conn.fetchrow(
-            "SELECT customer_id, status, shap_explanation FROM transactions WHERE transaction_id = $1",
+            "SELECT customer_id, status, shap_explanation, scenario_id, terminal_id, tx_datetime FROM transactions WHERE transaction_id = $1",
             body.transaction_id,
         )
 
@@ -500,6 +581,28 @@ async def decline_transaction(
             body.transaction_id, json.dumps(updated_reasons),
         )
 
+    # Update CSV label
+    update_transaction_label(body.transaction_id, is_fraud=True, scenario_id=tx["scenario_id"])
+
+    # If declined and scenario is 2 (Terminal Skimming), blacklist and retro-propagate
+    if tx["scenario_id"] == 2:
+        try:
+            pipeline = get_pipeline()
+            pipeline.compromise_terminal(tx["terminal_id"])
+            compromise_start = tx["tx_datetime"].strftime("%Y-%m-%d %H:%M:%S")
+            retro_propagate_skimming(tx["terminal_id"], compromise_start)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE transactions
+                    SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                    WHERE terminal_id = $1 AND tx_datetime >= $2
+                    """,
+                    tx["terminal_id"], tx["tx_datetime"]
+                )
+        except Exception as e:
+            logger.error(f"Failed to compromise terminal and retro-propagate on decline: {e}")
+
     # Delete any leftover OTP from Redis
     r = get_redis()
     await r.delete(f"otp:{body.transaction_id}")
@@ -528,3 +631,229 @@ async def decline_transaction(
     })
 
     return {"status": "DECLINED", "message": "OTP timed out. Transaction flagged as fraud."}
+
+
+class ReportFraudRequest(BaseModel):
+    transaction_id: str
+
+
+@router.post("/report-fraud")
+async def report_fraud(
+    body: ReportFraudRequest,
+    customer_id: int = Depends(get_current_customer),
+):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        tx = await conn.fetchrow(
+            "SELECT customer_id, terminal_id, tx_amount, tx_datetime, status FROM transactions WHERE transaction_id = $1",
+            body.transaction_id,
+        )
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    if tx["customer_id"] != customer_id:
+        raise HTTPException(status_code=403, detail="Not your transaction.")
+
+    # Update status to 'REPORTED_FRAUD', is_fraud = True
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE transactions
+            SET status = 'REPORTED_FRAUD', is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+            WHERE transaction_id = $1
+            """,
+            body.transaction_id,
+        )
+
+    # Update CSV label
+    update_transaction_label(body.transaction_id, is_fraud=True, scenario_id=2)
+
+    # Blacklist the terminal in the pipeline
+    try:
+        pipeline = get_pipeline()
+        pipeline.compromise_terminal(tx["terminal_id"])
+
+        # Retroactively update labels of all transactions at this terminal during the compromise window!
+        compromise_start = tx["tx_datetime"].strftime("%Y-%m-%d %H:%M:%S")
+        retro_propagate_skimming(tx["terminal_id"], compromise_start)
+
+        # Update PostgreSQL database labels too!
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE transactions
+                SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                WHERE terminal_id = $1 AND tx_datetime >= $2
+                """,
+                tx["terminal_id"], tx["tx_datetime"]
+            )
+    except Exception as e:
+        logger.error(f"Failed to compromise terminal and retro-propagate on report: {e}")
+
+    # Broadcast to dashboard
+    await ws_manager.broadcast({
+        "event": "TRANSACTION_REPORTED",
+        "transaction_id": body.transaction_id,
+        "terminal_id": tx["terminal_id"],
+        "status": "REPORTED_FRAUD",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    logger.warning(
+        f"[bold red][FEEDBACK] Customer {customer_id} reported Transaction {body.transaction_id} at Terminal {tx['terminal_id']} as compromised! Blacklisting terminal.",
+        extra={
+            "event_type": "CUSTOMER_REPORT",
+            "customer_id": customer_id,
+            "transaction_id": body.transaction_id,
+            "terminal_id": tx["terminal_id"]
+        }
+    )
+
+    return {"status": "REPORTED_FRAUD", "message": "Thank you. The transaction has been reported and security measures have been applied."}
+
+
+@router.post("/simulate")
+async def simulate_transaction(body: SimulateTxRequest):
+    pool = await get_db_pool()
+    tx_id = str(body.transaction_id)
+    customer_id = body.customer_id
+
+    # 1. Fetch customer details or seed mock customer
+    async with pool.acquire() as conn:
+        customer = await conn.fetchrow(
+            "SELECT phone_number, registration_lat, registration_lon FROM customers WHERE customer_id = $1",
+            customer_id,
+        )
+    if not customer:
+        pw_hash = "mock_hash"
+        phone = f"+2010{customer_id:08d}"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO customers (customer_id, phone_number, password_hash, full_name, role)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (customer_id) DO NOTHING
+                """,
+                customer_id, phone, pw_hash, f"Customer {customer_id}", "user"
+            )
+        phone_number = phone
+    else:
+        phone_number = customer["phone_number"]
+
+    # 2. Score transaction
+    tx_dict = {
+        "TRANSACTION_ID": tx_id,
+        "CUSTOMER_ID":    customer_id,
+        "TERMINAL_ID":    body.terminal_id,
+        "TX_DATETIME":    body.tx_datetime,
+        "TX_AMOUNT":      body.tx_amount,
+        "PHONE_NUMBER":   phone_number,
+    }
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, score_transaction, tx_dict)
+
+    result = {
+        **result,
+        "is_fraud": bool(result["is_fraud"]),
+        "fraud_probability": float(result["fraud_probability"]),
+        "scenario_id": int(result["scenario_id"]) if result["scenario_id"] is not None else None,
+    }
+
+    # 3. Look up ground truth
+    gt_fraud, gt_scenario = lookup_ground_truth(customer_id, body.terminal_id, body.tx_amount)
+
+    initial_status = "PENDING_OTP" if result["is_fraud"] else "APPROVED"
+    final_is_fraud = result["is_fraud"]
+    final_scenario_id = result["scenario_id"]
+    final_scenario_name = result["scenario_name"]
+
+    # If it is a False Negative, trigger automated customer feedback loop
+    if not result["is_fraud"] and gt_fraud == 1:
+        initial_status = "REPORTED_FRAUD"
+        final_is_fraud = True
+        final_scenario_id = gt_scenario if gt_scenario > 0 else 2
+        final_scenario_name = {1: "Large Amount", 2: "Terminal Skimming", 3: "Credential Takeover"}.get(final_scenario_id, "Terminal Skimming")
+
+        logger.warning(
+            f"[bold yellow][FEEDBACK] Customer {customer_id} noticed unauthorized activity from Terminal {body.terminal_id} and filed a report.[/bold yellow]",
+            extra={
+                "event_type": "CUSTOMER_FEEDBACK",
+                "customer_id": customer_id,
+                "terminal_id": body.terminal_id,
+                "transaction_id": tx_id
+            }
+        )
+
+        if final_scenario_id == 2:
+            try:
+                pipeline = get_pipeline()
+                pipeline.compromise_terminal(body.terminal_id)
+                retro_propagate_skimming(body.terminal_id, body.tx_datetime)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE transactions
+                        SET is_fraud = TRUE, scenario_id = 2, scenario_name = 'Terminal Skimming'
+                        WHERE terminal_id = $1 AND tx_datetime >= $2
+                        """,
+                        body.terminal_id, body.tx_datetime
+                    )
+            except Exception as e:
+                logger.error(f"Failed to compromise terminal and retro-propagate: {e}")
+
+    otp_expires_at = None
+    if result["is_fraud"]:
+        # Standard OTP expires at now + 40s
+        otp_expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
+
+    # 4. Insert into database
+    # Since we can have SQLite or Postgres, we parse dates
+    from backend.db.postgres import _use_sqlite
+    now_parsed = datetime.fromisoformat(body.tx_datetime.replace(" ", "T")) if "T" not in body.tx_datetime else datetime.fromisoformat(body.tx_datetime)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO transactions (
+                transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
+                is_fraud, fraud_probability, scenario_id, scenario_name,
+                top_reason, status, shap_explanation, otp_expires_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (transaction_id) DO NOTHING
+            """,
+            tx_id, customer_id, body.terminal_id, body.tx_amount, now_parsed,
+            final_is_fraud, result["fraud_probability"],
+            final_scenario_id, final_scenario_name,
+            result["top_reason"], initial_status,
+            json.dumps(result.get("top_reasons", [])),
+            otp_expires_at,
+        )
+
+    # 5. Save to CSV
+    append_transaction(
+        tx_dict,
+        is_fraud=final_is_fraud,
+        scenario_id=final_scenario_id
+    )
+
+    # 6. Broadcast to WebSocket
+    await ws_manager.broadcast({
+        "event":              "TRANSACTION",
+        "transaction_id":     tx_id,
+        "customer_id":        customer_id,
+        "terminal_id":        body.terminal_id,
+        "amount":             body.tx_amount,
+        "fraud_probability":  result["fraud_probability"],
+        "is_fraud":           final_is_fraud,
+        "scenario_name":      final_scenario_name,
+        "top_reason":         result["top_reason"],
+        "top_reasons":        result.get("top_reasons", []),
+        "status":             initial_status,
+        "timestamp":          now_parsed.isoformat(),
+    })
+
+    if result["is_fraud"]:
+        otp = generate_otp()
+        await store_otp(tx_id, otp, ttl=OTP_TTL_SECONDS)
+
+    return {"status": initial_status, "transaction_id": tx_id}

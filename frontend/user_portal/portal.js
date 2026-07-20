@@ -165,8 +165,8 @@ async function loadHistory() {
 }
 
 function txItem(r) {
-  const statusIcon = { APPROVED: "✅", VERIFIED: "🔵", DECLINED: "🔴", PENDING_OTP: "🟡", PENDING: "⏳" }[r.status] || "💳";
-  const amtClass   = r.is_fraud && r.status === "DECLINED" ? "negative" : "positive";
+  const statusIcon = { APPROVED: "✅", VERIFIED: "🔵", DECLINED: "🔴", PENDING_OTP: "🟡", PENDING: "⏳", REPORTED_FRAUD: "🚨" }[r.status] || "💳";
+  const amtClass   = (r.is_fraud || r.status === "REPORTED_FRAUD") && r.status !== "APPROVED" && r.status !== "VERIFIED" ? "negative" : "positive";
   const date       = new Date(r.tx_datetime).toLocaleString();
   const isPending  = r.status === "PENDING_OTP";
   return `
