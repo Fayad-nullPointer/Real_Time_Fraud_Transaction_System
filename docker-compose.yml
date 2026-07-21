@@ -1,0 +1,115 @@
+# docker-compose.yml
+# ==================
+# Runs the full fraud-detection stack with a single:
+#   docker compose up --build
+#
+# Services:
+#   postgres  – PostgreSQL 16 on port 5432 (internal) / 5433 (host)
+#   redis     – Redis 7 on port 6379
+#   backend   – FastAPI + ML model on port 8000
+#   frontend  – TanStack Start (Nitro SSR) on port 3000
+#
+# Environment:
+#   Copy .env.example to .env and fill in real values before running.
+
+name: fraud-detection
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: fraud_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"          # Host 5433 -> container 5432 (matches existing .env)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fraud_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: fraud_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: fraud_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fraud_db
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER:-}
+    volumes:
+      - ./models:/app/models:ro      # Mount pre-trained model artifacts (read-only)
+      - ./logs:/app/logs             # Persist fraud event logs
+    ports:
+      - "8005:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── React Frontend (TanStack Start / Nitro SSR) ────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""             # Empty = relative paths (proxied via Nitro or Nginx)
+        VITE_API_HOST: backend:8000
+        VITE_WS_URL: ws://backend:8000
+    container_name: fraud_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      # Tell the Nitro SSR server where the backend lives for server-side fetch
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"          # Access the UI at http://localhost:3000
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  pg_data:
+  redis_data:

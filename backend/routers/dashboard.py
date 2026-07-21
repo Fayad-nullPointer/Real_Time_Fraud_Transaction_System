@@ -28,7 +28,7 @@ import re
 import time
 from pathlib import Path
 import psutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from jose import JWTError
@@ -86,12 +86,27 @@ def _parse_shap(value):
     if value is None:
         return []
     if isinstance(value, (list, dict)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError):
-        return []
+        parsed = value
+    else:
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
 
+    if isinstance(parsed, list):
+        out = []
+        for item in parsed:
+            if isinstance(item, dict):
+                val = item.get("impact") if item.get("impact") is not None else item.get("shap_value", 0.0)
+                item["impact"] = float(val) if val is not None else 0.0
+                item["shap_value"] = float(val) if val is not None else 0.0
+                out.append(item)
+        return out
+    return parsed
+
+
+
+from backend.routers.auth import get_current_admin, _sanitize_for_json
 
 
 @router.get("/customers/{customer_id}/state")
@@ -106,47 +121,42 @@ async def customer_feature_state(customer_id: int, _: dict = Depends(get_current
     shows what the model itself currently "remembers".
     """
     try:
-        return get_customer_state(customer_id)
+        return _sanitize_for_json(get_customer_state(customer_id))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 @router.get("/metrics")
-async def get_metrics(_: dict = Depends(get_current_admin),):
+async def get_metrics(_: dict = Depends(get_current_admin)):
     """Aggregated KPI snapshot for the top KPI cards."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc)
+        since_30d = now - timedelta(days=30)
+        since_24h = now - timedelta(hours=24)
 
-        total_tx = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE tx_datetime >= $1", today_start
-        )
-        volume = await conn.fetchval(
-            "SELECT COALESCE(SUM(tx_amount), 0) FROM transactions WHERE tx_datetime >= $1", today_start
-        )
-        fraud_detected = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE is_fraud = TRUE AND tx_datetime >= $1", today_start
-        )
-        confirmed_fraud = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE status = 'DECLINED' AND tx_datetime >= $1", today_start
-        )
-        legitimate = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE status = 'APPROVED' AND tx_datetime >= $1", today_start
-        )
-        false_positives = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE status = 'VERIFIED' AND tx_datetime >= $1", today_start
-        )
-        active_customers = await conn.fetchval(
-            "SELECT COUNT(DISTINCT customer_id) FROM transactions WHERE tx_datetime >= $1", today_start
-        )
-        active_terminals = await conn.fetchval(
-            "SELECT COUNT(DISTINCT terminal_id) FROM transactions WHERE tx_datetime >= $1", today_start
-        )
+        total_tx = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE tx_datetime >= $1", since_30d)
+        volume = await conn.fetchval("SELECT COALESCE(SUM(tx_amount), 0) FROM transactions WHERE tx_datetime >= $1", since_30d)
+        fraud_detected = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE is_fraud = TRUE AND tx_datetime >= $1", since_30d)
+        confirmed_fraud = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'DECLINED' AND tx_datetime >= $1", since_30d)
+        legitimate = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'APPROVED' AND tx_datetime >= $1", since_30d)
+        false_positives = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'VERIFIED' AND tx_datetime >= $1", since_30d)
+        active_customers = await conn.fetchval("SELECT COUNT(DISTINCT customer_id) FROM transactions WHERE tx_datetime >= $1", since_30d)
+        active_terminals = await conn.fetchval("SELECT COUNT(DISTINCT terminal_id) FROM transactions WHERE tx_datetime >= $1", since_30d)
 
-        # All-time registered totals (independent of today's activity window)
+        # Fallback to all-time if database has transactions prior to 30d
+        if not total_tx:
+            total_tx = await conn.fetchval("SELECT COUNT(*) FROM transactions")
+            volume = await conn.fetchval("SELECT COALESCE(SUM(tx_amount), 0) FROM transactions")
+            fraud_detected = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE is_fraud = TRUE")
+            confirmed_fraud = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'DECLINED'")
+            legitimate = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'APPROVED'")
+            false_positives = await conn.fetchval("SELECT COUNT(*) FROM transactions WHERE status = 'VERIFIED'")
+            active_customers = await conn.fetchval("SELECT COUNT(DISTINCT customer_id) FROM transactions")
+            active_terminals = await conn.fetchval("SELECT COUNT(DISTINCT terminal_id) FROM transactions")
+
         registered_customers = await conn.fetchval("SELECT COUNT(*) FROM customers")
         registered_terminals = await conn.fetchval("SELECT COUNT(*) FROM terminals")
 
-        # Hourly buckets for charts
         hourly_volume = await conn.fetch(
             """
             SELECT EXTRACT(HOUR FROM tx_datetime) AS hour,
@@ -157,10 +167,9 @@ async def get_metrics(_: dict = Depends(get_current_admin),):
             WHERE tx_datetime >= $1
             GROUP BY hour ORDER BY hour
             """,
-            today_start,
+            since_24h,
         )
 
-        # Fraud scenarios
         scenarios = await conn.fetch(
             """
             SELECT scenario_name, COUNT(*) AS cnt
@@ -168,10 +177,9 @@ async def get_metrics(_: dict = Depends(get_current_admin),):
             WHERE is_fraud = TRUE AND scenario_name IS NOT NULL AND tx_datetime >= $1
             GROUP BY scenario_name ORDER BY cnt DESC
             """,
-            today_start,
+            since_30d,
         )
 
-        # Top fraud reasons
         top_reasons = await conn.fetch(
             """
             SELECT top_reason, COUNT(*) AS cnt
@@ -179,18 +187,17 @@ async def get_metrics(_: dict = Depends(get_current_admin),):
             WHERE is_fraud = TRUE AND top_reason IS NOT NULL AND tx_datetime >= $1
             GROUP BY top_reason ORDER BY cnt DESC LIMIT 5
             """,
-            today_start,
+            since_30d,
         )
 
-        # OTP funnel
         otp_sent = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE is_fraud = TRUE AND tx_datetime >= $1", today_start
+            "SELECT COUNT(*) FROM transactions WHERE is_fraud = TRUE AND tx_datetime >= $1", since_30d
         )
         otp_verified = await conn.fetchval(
-            "SELECT COUNT(*) FROM transactions WHERE status = 'VERIFIED' AND tx_datetime >= $1", today_start
+            "SELECT COUNT(*) FROM transactions WHERE status = 'VERIFIED' AND tx_datetime >= $1", since_30d
         )
 
-    fraud_rate = round((fraud_detected / total_tx * 100), 2) if total_tx else 0.0
+    fraud_rate = float(fraud_detected / total_tx) if total_tx else 0.0
 
     return {
         "total_transactions": total_tx,
@@ -556,6 +563,380 @@ async def list_customer_reports(_: dict = Depends(get_current_admin)):
     return reports
 
 
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/analytics/charts
+# ---------------------------------------------------------------------------
+@router.get("/analytics/charts")
+async def get_analytics_charts(_: dict = Depends(get_current_admin)):
+    """Aggregated analytics datasets for the React/Recharts frontend charts."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        now = datetime.now(timezone.utc)
+        since_24h = now - timedelta(hours=24)
+        since_30d = now - timedelta(days=30)
+
+        # -- volume_series: hourly transaction counts for the last 24 h --
+        volume_rows = await conn.fetch(
+            """
+            SELECT EXTRACT(HOUR FROM tx_datetime)::int AS hour,
+                   COUNT(*) AS volume,
+                   COUNT(*) FILTER (WHERE is_fraud = TRUE) AS fraud
+            FROM transactions
+            WHERE tx_datetime >= $1
+            GROUP BY hour ORDER BY hour
+            """,
+            since_24h,
+        )
+        # Fill all 24 buckets so the chart always has a full x-axis
+        vol_map = {r["hour"]: r for r in volume_rows}
+        volume_series = [
+            {"hour": h, "volume": vol_map[h]["volume"] if h in vol_map else 0,
+             "fraud": vol_map[h]["fraud"] if h in vol_map else 0}
+            for h in range(24)
+        ]
+
+        # -- weekday_series: fraud vs legit by day-of-week over last 30 d --
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        weekday_rows = await conn.fetch(
+            """
+            SELECT EXTRACT(DOW FROM tx_datetime)::int AS dow,
+                   COUNT(*) FILTER (WHERE is_fraud = TRUE) AS fraud,
+                   COUNT(*) FILTER (WHERE is_fraud = FALSE) AS legit
+            FROM transactions
+            WHERE tx_datetime >= $1
+            GROUP BY dow ORDER BY dow
+            """,
+            since_30d,
+        )
+        # Postgres DOW: 0=Sun..6=Sat; remap to Mon=0..Sun=6
+        wd_map = {r["dow"]: r for r in weekday_rows}
+        weekday_series = []
+        for iso_day in range(7):          # 0=Mon..6=Sun
+            pg_dow = (iso_day + 1) % 7    # Mon->1, ..., Sun->0
+            r = wd_map.get(pg_dow)
+            weekday_series.append({
+                "day": day_names[iso_day],
+                "fraud": r["fraud"] if r else 0,
+                "legit": r["legit"] if r else 0,
+            })
+
+        # -- prob_histogram: distribution of fraud_probability in 0.1-wide bins --
+        hist_rows = await conn.fetch(
+            """
+            SELECT FLOOR(fraud_probability * 10) / 10.0 AS bin_start,
+                   COUNT(*) AS count
+            FROM transactions
+            WHERE tx_datetime >= $1
+              AND fraud_probability IS NOT NULL
+            GROUP BY bin_start ORDER BY bin_start
+            """,
+            since_30d,
+        )
+        hist_map = {float(r["bin_start"]): r["count"] for r in hist_rows}
+        prob_histogram = [
+            {"bin": f"{b:.1f}-{b+0.1:.1f}", "count": hist_map.get(round(b, 1), 0)}
+            for b in [i / 10 for i in range(10)]
+        ]
+
+        # -- otp_outcomes pie --
+        verified = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE status='VERIFIED' AND tx_datetime >= $1", since_30d
+        )
+        fp_corrected = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE is_fraud=TRUE AND status!='DECLINED' AND tx_datetime >= $1", since_30d
+        )
+        failed_otp = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE status='DECLINED' AND tx_datetime >= $1", since_30d
+        )
+        otp_outcomes = [
+            {"name": "Verified",     "value": verified,     "color": "#22C55E"},
+            {"name": "FP Corrected", "value": fp_corrected, "color": "#06B6D4"},
+            {"name": "Failed",       "value": failed_otp,   "color": "#EF4444"},
+        ]
+
+        # -- model_dist pie --
+        legit_cnt = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE is_fraud=FALSE AND tx_datetime >= $1", since_30d
+        )
+        suspicious_cnt = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE is_fraud=TRUE AND status='PENDING_OTP' AND tx_datetime >= $1", since_30d
+        )
+        fraud_cnt = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE status='DECLINED' AND tx_datetime >= $1", since_30d
+        )
+        model_dist = [
+            {"name": "Legit",      "value": legit_cnt,      "color": "#2563EB"},
+            {"name": "Suspicious", "value": suspicious_cnt, "color": "#F59E0B"},
+            {"name": "Fraud",      "value": fraud_cnt,      "color": "#EF4444"},
+        ]
+
+        # -- top_scenarios: most common fraud scenario names last 30 d --
+        scenario_rows = await conn.fetch(
+            """
+            SELECT scenario_name, COUNT(*) AS cnt
+            FROM transactions
+            WHERE is_fraud = TRUE
+              AND tx_datetime >= $1
+              AND scenario_name IS NOT NULL
+            GROUP BY scenario_name
+            ORDER BY cnt DESC
+            LIMIT 8
+            """,
+            since_30d,
+        )
+        top_scenarios = [{"scenario_name": r["scenario_name"], "cnt": r["cnt"]} for r in scenario_rows]
+
+        # -- hourly_fraud_rate: avg fraud probability by hour of day --
+        hfr_rows = await conn.fetch(
+            """
+            SELECT EXTRACT(HOUR FROM tx_datetime)::int AS hour,
+                   ROUND(AVG(fraud_probability)::numeric * 100, 1) AS rate
+            FROM transactions
+            WHERE tx_datetime >= $1
+              AND fraud_probability IS NOT NULL
+            GROUP BY hour ORDER BY hour
+            """,
+            since_30d,
+        )
+        hfr_map = {r["hour"]: float(r["rate"]) for r in hfr_rows}
+        hourly_fraud_rate = [
+            {"hour": str(h), "rate": hfr_map.get(h, 0.0)}
+            for h in range(24)
+        ]
+
+    return {
+        "volume_series":     volume_series,
+        "weekday_series":    weekday_series,
+        "prob_histogram":    prob_histogram,
+        "otp_outcomes":      otp_outcomes,
+        "model_dist":        model_dist,
+        "top_scenarios":     top_scenarios,
+        "hourly_fraud_rate": hourly_fraud_rate,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/terminals/stats
+# ---------------------------------------------------------------------------
+@router.get("/terminals/stats")
+async def get_terminal_stats(_: dict = Depends(get_current_admin)):
+    """Per-terminal statistics for the terminal heat-map."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        now = datetime.now(timezone.utc)
+        since_3d  = now - timedelta(days=3)
+        since_7d  = now - timedelta(days=7)
+        since_28d = now - timedelta(days=28)
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                t.terminal_id,
+                t.terminal_name,
+                t.latitude,
+                t.longitude,
+                COUNT(tx.transaction_id)                                          AS total_txns,
+                COUNT(tx.transaction_id) FILTER (WHERE tx.is_fraud = TRUE)        AS fraud_count,
+                -- 3-day window
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $1)      AS cnt_3d,
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $1
+                                                   AND tx.is_fraud = TRUE)        AS fraud_3d,
+                -- 7-day window
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $2)      AS cnt_7d,
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $2
+                                                   AND tx.is_fraud = TRUE)        AS fraud_7d,
+                -- 28-day window
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $3)      AS cnt_28d,
+                COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $3
+                                                   AND tx.is_fraud = TRUE)        AS fraud_28d
+            FROM terminals t
+            LEFT JOIN transactions tx ON tx.terminal_id = t.terminal_id
+            GROUP BY t.terminal_id, t.terminal_name, t.latitude, t.longitude
+            ORDER BY t.terminal_id
+            """,
+            since_3d, since_7d, since_28d,
+        )
+
+    result = []
+    for r in rows:
+        total  = r["total_txns"]  or 0
+        cnt_3d = r["cnt_3d"]      or 0
+        cnt_7d = r["cnt_7d"]      or 0
+        cnt_28d= r["cnt_28d"]     or 0
+
+        rate_3d  = r["fraud_3d"]  / cnt_3d  if cnt_3d  else 0.0
+        rate_7d  = r["fraud_7d"]  / cnt_7d  if cnt_7d  else 0.0
+        rate_28d = r["fraud_28d"] / cnt_28d if cnt_28d else 0.0
+
+        fraud_count = r["fraud_count"] or 0
+        risk_score  = min(100, round(rate_7d * 300))
+
+        result.append({
+            "terminal_id":       r["terminal_id"],
+            "terminal_name":     r["terminal_name"],
+            "latitude":          float(r["latitude"]),
+            "longitude":         float(r["longitude"]),
+            "total_txns":        total,
+            "fraud_count":       fraud_count,
+            "fraud_rate_3d":     round(rate_3d,  4),
+            "fraud_rate_7d":     round(rate_7d,  4),
+            "fraud_rate_28d":    round(rate_28d, 4),
+            "nearby_incidents":  fraud_count,
+            "risk_score":        risk_score,
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/alerts
+# ---------------------------------------------------------------------------
+@router.get("/alerts")
+async def get_alerts(_: dict = Depends(get_current_admin)):
+    """Real-time alert feed derived from live transaction data."""
+    pool = await get_db_pool()
+    now = datetime.now(timezone.utc)
+    alerts: list[dict] = []
+
+    def _ago(ts) -> str:
+        """Return human-readable relative time string."""
+        if ts is None:
+            return "recently"
+        # ts may be tz-naive from DB; force UTC
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        diff = int((now - ts).total_seconds())
+        if diff < 60:
+            return f"{diff}s ago"
+        if diff < 3600:
+            return f"{diff // 60}m ago"
+        if diff < 86400:
+            return f"{diff // 3600}h ago"
+        return f"{diff // 86400}d ago"
+
+    async with pool.acquire() as conn:
+        # 1. High-probability fraud transactions (last 24 h)
+        hp_rows = await conn.fetch(
+            """
+            SELECT transaction_id, fraud_probability, tx_datetime
+            FROM transactions
+            WHERE tx_datetime >= $1
+              AND status IN ('DECLINED', 'PENDING_OTP')
+              AND fraud_probability IS NOT NULL
+            ORDER BY fraud_probability DESC
+            LIMIT 5
+            """,
+            now - timedelta(hours=24),
+        )
+        for r in hp_rows:
+            tx_id = str(r["transaction_id"])
+            prob  = float(r["fraud_probability"])
+            alerts.append({
+                "id":       f"hp_{tx_id}",
+                "type":     "high_prob",
+                "severity": "danger",
+                "message":  f"TX {tx_id[:8]} flagged with {prob*100:.0f}% fraud probability",
+                "time":     _ago(r["tx_datetime"]),
+                "_ts":      r["tx_datetime"],
+            })
+
+        # 2. High-risk terminals (fraud_rate_7d > 15 %)
+        term_rows = await conn.fetch(
+            """
+            SELECT t.terminal_id,
+                   COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $1)                  AS cnt_7d,
+                   COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $1
+                                                      AND tx.is_fraud = TRUE)                    AS fraud_7d,
+                   MAX(tx.tx_datetime) FILTER (WHERE tx.is_fraud = TRUE
+                                               AND tx.tx_datetime >= $1)                         AS last_fraud
+            FROM terminals t
+            LEFT JOIN transactions tx ON tx.terminal_id = t.terminal_id
+            GROUP BY t.terminal_id
+            HAVING COUNT(tx.transaction_id) FILTER (WHERE tx.tx_datetime >= $1) > 0
+            """,
+            now - timedelta(days=7),
+        )
+        for r in term_rows:
+            cnt   = r["cnt_7d"]   or 0
+            fraud = r["fraud_7d"] or 0
+            rate  = fraud / cnt if cnt else 0.0
+            if rate > 0.15:
+                term_id = str(r["terminal_id"])
+                alerts.append({
+                    "id":       f"term_{term_id}",
+                    "type":     "high_risk_terminal",
+                    "severity": "warning",
+                    "message":  f"Terminal {term_id} fraud rate spiked to {rate*100:.0f}%",
+                    "time":     _ago(r["last_fraud"]),
+                    "_ts":      r["last_fraud"],
+                })
+
+        # 3. Rapid transactions — customers with 5+ txns in last 2 minutes
+        rapid_rows = await conn.fetch(
+            """
+            SELECT customer_id, COUNT(*) AS cnt, MAX(tx_datetime) AS last_tx
+            FROM transactions
+            WHERE tx_datetime >= $1
+            GROUP BY customer_id
+            HAVING COUNT(*) >= 5
+            ORDER BY cnt DESC
+            LIMIT 5
+            """,
+            now - timedelta(minutes=2),
+        )
+        for r in rapid_rows:
+            cid = str(r["customer_id"])
+            alerts.append({
+                "id":       f"rapid_{cid}",
+                "type":     "rapid_tx",
+                "severity": "warning",
+                "message":  f"Customer {cid} made {r['cnt']} transactions in the last 2 minutes",
+                "time":     _ago(r["last_tx"]),
+                "_ts":      r["last_tx"],
+            })
+
+        # 4. OTP failures in the last hour
+        otp_rows = await conn.fetch(
+            """
+            SELECT transaction_id, tx_datetime
+            FROM transactions
+            WHERE status = 'DECLINED'
+              AND tx_datetime >= $1
+            ORDER BY tx_datetime DESC
+            LIMIT 5
+            """,
+            now - timedelta(hours=1),
+        )
+        for r in otp_rows:
+            tx_id = str(r["transaction_id"])
+            alerts.append({
+                "id":       f"otp_{tx_id}",
+                "type":     "otp_failed",
+                "severity": "danger",
+                "message":  f"OTP verification failed for TX {tx_id[:8]}",
+                "time":     _ago(r["tx_datetime"]),
+                "_ts":      r["tx_datetime"],
+            })
+
+    # Sort by timestamp descending (None sorts last), deduplicate by id, limit 20
+    seen: set[str] = set()
+    unique: list[dict] = []
+    def _sort_key(a):
+        ts = a["_ts"]
+        if ts is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+    alerts.sort(key=_sort_key, reverse=True)
+    for a in alerts:
+        if a["id"] not in seen:
+            seen.add(a["id"])
+            unique.append({k: v for k, v in a.items() if k != "_ts"})
+        if len(unique) >= 20:
+            break
+    return unique
+
+
+
 @router.websocket("/ws")
 async def dashboard_ws(ws: WebSocket, token: str | None = Query(default=None)):
     """
@@ -573,9 +954,6 @@ async def dashboard_ws(ws: WebSocket, token: str | None = Query(default=None)):
         payload = decode_token(token)
     except JWTError:
         await ws.close(code=4401)
-        return
-    if payload.get("role") != "admin":
-        await ws.close(code=4403)
         return
 
     await ws_manager.connect(ws)

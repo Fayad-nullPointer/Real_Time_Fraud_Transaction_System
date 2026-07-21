@@ -61,7 +61,7 @@ async def resolve_city_from_coords(lat: float | None, lon: float | None) -> str:
         ) as client:
             resp = await client.get(
                 "https://nominatim.openstreetmap.org/reverse",
-                params={"lat": lat, "lon": lon, "format": "json", "zoom": 10},
+                params={"lat": lat, "lon": lon, "format": "json", "zoom": 10, "accept-language": "en"},
             )
             data = resp.json()
             addr = data.get("address", {})

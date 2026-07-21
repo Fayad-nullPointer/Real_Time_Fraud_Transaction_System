@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from backend.db.realtime_csv import append_transaction, update_transaction_label, retro_propagate_skimming
 
 from logger import get_logger
-from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction, lookup_ground_truth
+from backend.core.pipeline_wrapper import generate_otp, get_pipeline, score_transaction, lookup_ground_truth, ensure_customer_warmed
 
 logger = get_logger("transactions")
 
@@ -90,6 +90,9 @@ async def create_transaction(
         "TX_AMOUNT":      body.tx_amount,
         "PHONE_NUMBER":   customer["phone_number"],
     }
+
+    # Ensure customer's recent history is warm-started from DB before scoring
+    await ensure_customer_warmed(customer_id)
 
     # Run ML inference (LightGBM + SHAP + a synchronous Twilio call on
     # fraud) in a worker thread so it never blocks the event loop —
@@ -220,6 +223,10 @@ async def create_transaction(
         "transaction_id": tx_id,
         "status": "APPROVED",
         "message": "Transaction approved.",
+        "fraud_probability": result["fraud_probability"],
+        "scenario": result.get("scenario_name"),
+        "top_reason": result.get("top_reason"),
+        "top_reasons": result.get("top_reasons", []),
     }
 
 

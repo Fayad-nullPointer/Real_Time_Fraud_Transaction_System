@@ -311,39 +311,21 @@ class FraudFeatureEngineer:
     def is_cold_start(self, customer_id) -> bool:
         """True if `customer_id` is still being scored on a population-
         default profile rather than their own real, learned statistics."""
-        return customer_id in self._cold_start_ids
+        if customer_id not in self._cold_start_ids:
+            return False
+        state = self._customer_state.get(customer_id)
+        if state and state.running_n >= self.COLD_START_PROMOTE_AFTER:
+            self._cold_start_ids.discard(customer_id)
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Warm start — seed realtime lag/velocity buffers from REAL history
     # ------------------------------------------------------------------ #
     def warm_start_customer(self, customer_id, history_df: pd.DataFrame) -> bool:
         """
-        Seed a single known customer's realtime lag/velocity state (the
-        deques used for tx_count_1h/4h, PREV_TX_AMOUNT_lag1-3, and
-        terminal velocity buffers) from a slice of their REAL transaction
-        history, e.g. the last few hours/days pulled from your transactions
-        table.
-
-        This is distinct from cold start: it does not touch
-        `customer_profiles_`, tiers, or `_cold_start_ids` — it only replays
-        `history_df`'s rows for this customer through
-        `register_realtime_state`, in chronological order, so the very next
-        transaction this process scores for them uses their real recent
-        activity instead of an empty (cold) buffer.
-
-        Parameters
-        ----------
-        customer_id : the CUSTOMER_ID to warm start.
-        history_df : a DataFrame with (at least) CUSTOMER_ID, TERMINAL_ID,
-            TX_DATETIME, TX_AMOUNT columns — rows for other customers are
-            ignored.
-
-        Returns
-        -------
-        True if at least one historical row was found (and replayed) for
-        this customer, False if `history_df` had no rows for them (nothing
-        to warm start — they'll still cold-start on their first live
-        transaction).
+        Seed a single known customer's realtime lag/velocity state from a
+        slice of their REAL transaction history and update profile baselines.
         """
         if not self.is_fitted:
             raise RuntimeError("Call `.fit()` / `.load()` before warm-starting.")
@@ -352,9 +334,11 @@ class FraudFeatureEngineer:
         if cust_hist.empty:
             return False
 
+        cust_hist["TX_AMOUNT"] = cust_hist["TX_AMOUNT"].astype(float)
         cust_hist["TX_DATETIME"] = pd.to_datetime(cust_hist["TX_DATETIME"], utc=True).dt.tz_localize(None)
         cust_hist = cust_hist.sort_values("TX_DATETIME")
 
+        # Replay transactions to seed velocity deques
         for _, row in cust_hist.iterrows():
             self.register_realtime_state({
                 "CUSTOMER_ID": customer_id,
@@ -362,6 +346,26 @@ class FraudFeatureEngineer:
                 "TX_DATETIME": row["TX_DATETIME"],
                 "TX_AMOUNT": row["TX_AMOUNT"],
             })
+
+        # Calculate actual mean & std from real database transactions
+        real_mean = float(cust_hist["TX_AMOUNT"].mean())
+        real_std = float(cust_hist["TX_AMOUNT"].std()) if len(cust_hist) > 1 else float(self.global_defaults_["std_amount"])
+        if np.isnan(real_std) or real_std == 0:
+            real_std = float(self.global_defaults_["std_amount"])
+
+        if customer_id not in self.customer_profiles_.index:
+            self.register_new_customer(customer_id)
+
+        self.customer_profiles_.loc[customer_id, "mean_amount"] = round(real_mean, 2)
+        self.customer_profiles_.loc[customer_id, "std_amount"] = round(real_std, 2)
+
+        state = self._customer_state.get(customer_id)
+        if state:
+            state.running_n = len(cust_hist)
+            state.running_mean = real_mean
+
+        if (state and state.running_n >= self.COLD_START_PROMOTE_AFTER) or len(cust_hist) >= self.COLD_START_PROMOTE_AFTER:
+            self._cold_start_ids.discard(customer_id)
         return True
 
     def warm_start_from_history(self, history_df: pd.DataFrame, *, customer_ids=None) -> dict:
@@ -439,31 +443,41 @@ class FraudFeatureEngineer:
         if not self.is_fitted:
             raise RuntimeError("Feature engineer is not fitted / loaded.")
 
+        if customer_id not in self.customer_profiles_.index:
+            self.register_new_customer(customer_id)
+
         known = customer_id in self.customer_profiles_.index
+        state = self._customer_state.get(customer_id)
+
+        cust = self.customer_profiles_.loc[customer_id]
+        mean_amt = float(cust["mean_amount"])
+        std_amt = float(cust["std_amount"])
+
+        # If online state has learned a mean/std, report the online state
+        if state is not None and state.running_n > 0:
+            if state.running_mean is not None:
+                mean_amt = float(state.running_mean)
+            if state.running_n > 1 and state.running_m2 > 0:
+                std_amt = float(np.sqrt(state.running_m2 / (state.running_n - 1)))
+
         out = {
             "customer_id": customer_id,
             "known_profile": known,
             "is_cold_start": self.is_cold_start(customer_id),
             "is_warm": self.is_warm(customer_id),
-            "profile": None,
-            "spending_tier": None,
+            "profile": {
+                "mean_amount": round(mean_amt, 2),
+                "std_amount": round(std_amt, 2),
+                "mean_nb_tx_per_day": float(cust.get("mean_nb_tx_per_day", 1.0)),
+                "nb_terminals": float(cust.get("nb_terminals", 1.0)),
+                "x_customer_id": float(cust.get("x_customer_id", 0.0)),
+                "y_customer_id": float(cust.get("y_customer_id", 0.0)),
+            },
+            "spending_tier": str(self.customer_tier_.get(customer_id, "Standard")),
         }
 
-        if known:
-            cust = self.customer_profiles_.loc[customer_id]
-            out["profile"] = {
-                "mean_amount": float(cust["mean_amount"]),
-                "std_amount": float(cust["std_amount"]),
-                "mean_nb_tx_per_day": float(cust["mean_nb_tx_per_day"]),
-                "nb_terminals": float(cust["nb_terminals"]),
-                "x_customer_id": float(cust["x_customer_id"]),
-                "y_customer_id": float(cust["y_customer_id"]),
-            }
-            out["spending_tier"] = str(self.customer_tier_.get(customer_id))
-
-        state = self._customer_state.get(customer_id)
         if state is not None:
-            now = pd.Timestamp.now()
+            now = pd.Timestamp.utcnow().tz_localize(None)
             recent = list(state.recent_tx_times)
             out["realtime"] = {
                 "last_amounts_chronological": list(state.last_amounts),
@@ -482,6 +496,7 @@ class FraudFeatureEngineer:
                 "cold_start_running_n": 0,
                 "cold_start_running_mean": None,
             }
+
         return out
 
     # ------------------------------------------------------------------ #
@@ -845,20 +860,26 @@ class FraudFeatureEngineer:
         # no retraining. Only runs for customers still on a population
         # default; once promoted they're indistinguishable from any other
         # known customer.
-        if cust_id in self._cold_start_ids:
-            state.running_n += 1
-            delta = amount - state.running_mean
-            state.running_mean += delta / state.running_n
-            state.running_m2 += delta * (amount - state.running_mean)
+        # --- Online baseline maintenance (Welford's algorithm) ---
+        state.running_n += 1
+        delta = amount - state.running_mean
+        state.running_mean += delta / state.running_n
+        state.running_m2 += delta * (amount - state.running_mean)
 
+        observed_std = (
+            float(np.sqrt(state.running_m2 / (state.running_n - 1)))
+            if state.running_n > 1 else float(self.global_defaults_["std_amount"])
+        )
+        observed_std = observed_std if (observed_std and not np.isnan(observed_std)) else float(self.global_defaults_["std_amount"])
+
+        if cust_id not in self.customer_profiles_.index:
+            self.register_new_customer(cust_id)
+
+        self.customer_profiles_.loc[cust_id, "mean_amount"] = round(state.running_mean, 2)
+        self.customer_profiles_.loc[cust_id, "std_amount"] = round(observed_std, 2)
+
+        if cust_id in self._cold_start_ids:
             if state.running_n >= self.COLD_START_PROMOTE_AFTER:
-                observed_std = (
-                    float(np.sqrt(state.running_m2 / (state.running_n - 1)))
-                    if state.running_n > 1 else self.global_defaults_["std_amount"]
-                )
-                observed_std = observed_std or self.global_defaults_["std_amount"]  # guard std==0
-                self.customer_profiles_.loc[cust_id, "mean_amount"] = state.running_mean
-                self.customer_profiles_.loc[cust_id, "std_amount"] = observed_std
                 tier = pd.cut(
                     [state.running_mean], bins=self.tier_bins_,
                     labels=self.tier_labels_, include_lowest=True,
