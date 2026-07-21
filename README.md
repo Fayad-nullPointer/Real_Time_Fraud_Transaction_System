@@ -6,6 +6,68 @@ This documentation is tailored to help developer teammates understand the archit
 
 ---
 
+## ⚡ Quick Start: Running Backend & UI
+
+Follow these simple steps to start the **FastAPI Backend** and the **React Admin/Customer UI**.
+
+### 1. 🐍 Start the Backend Server (FastAPI)
+Open a terminal in the root directory and run:
+```bash
+# Install dependencies & sync environment
+uv sync
+
+# Run the backend API server on port 8005
+uv run uvicorn backend.main:app --reload --port 8005
+```
+* **API Server**: `http://localhost:8005`
+* **Swagger API Docs**: `http://localhost:8005/docs`
+
+---
+
+### 2. 🎨 Start the Frontend UI (React + Vite)
+Open a second terminal, navigate to the `frontend` folder, and start the development server:
+```bash
+cd frontend
+
+# Install node dependencies
+bun install   # or npm install
+
+# Start frontend dev server
+bun run dev   # or npm run dev
+```
+* **Frontend Web App**: `http://localhost:8081` (or `http://localhost:3000`)
+
+---
+
+### 3. 🔐 Access Portals & Login Credentials
+
+#### 📊 Admin Dashboard (`http://localhost:8081/dashboard`)
+* **URL**: `http://localhost:8081/dashboard`
+* **Admin Customer ID / Card Number**: `100000` (or `100002`)
+* **Password**: `admin123`
+* **Role**: `admin`
+
+> **Features Included**:
+> * **Live Monitoring** (`/dashboard/live`): Real-time WebSocket stream of payments with SHAP explainability feature impacts.
+> * **Analytics** (`/dashboard/analytics`): Model performance, score distribution histogram, and 24h risk clock.
+> * **Kafka Event Logs** (`/dashboard/logs`): Real-time JSON log event viewer with log-level filters.
+> * **Customer Reports** (`/dashboard/reports`): Customer fraud claims and automated 2FA audit log resolution panel.
+> * **Customers Table** (`/dashboard/customers`): Paginated 20-customer per page directory with real profile inspector.
+> * **Interactive Chart Help**: `<HelpCircle />` hover tooltips on every chart explaining insights in plain English.
+
+#### 💳 Customer Payment Portal (`http://localhost:8081/pay`)
+* **URL**: `http://localhost:8081/pay`
+* **Customer ID / Card Number**: `100009` (or `100005`, `100006`)
+* **Password**: `password123`
+* **Role**: `user`
+
+> **Features Included**:
+> * Interactive Google Terminal Map location selector.
+> * Automatic HTML5 Geolocation reverse geocoded to real **City, Country** (e.g. `Cairo, Egypt`).
+> * Instant risk evaluation and WhatsApp 2FA OTP verification flow.
+
+---
+
 ## 🚀 What's New in this Branch?
 
 We have introduced several massive upgrades to the core pipeline:
@@ -229,41 +291,19 @@ uv run python -m backend.db.seed
 ## 4. Start the Backend API
 
 ```bash
-uv run uvicorn backend.main:app --reload --port 8008
+uv run uvicorn backend.main:app --reload --port 8005
 ```
 
 The API will:
-- Apply the PostgreSQL schema automatically
+- Apply the database schema automatically
 - Load the ML pipeline (may take ~30s if rebuilding feature engineer)
-- Expose: http://localhost:8008/docs (Swagger UI)
+- Expose: http://localhost:8005/docs (Swagger UI)
 
 ---
 
-## 5. Open the Frontends
+## 5. Seed Terminals (Optional Shortcut)
 
-Simply open in your browser (no build step needed):
-
-### Admin Dashboard
-```
-frontend/dashboard/index.html
-```
-
-### User Portal
-```
-frontend/user_portal/index.html
-```
-
-Or serve them with Python:
-```bash
-cd frontend/dashboard && python -m http.server 5500
-cd frontend/user_portal && python -m http.server 5501
-```
-
----
-
-## 6. Seed Terminals (optional shortcut)
-
-If you just want to run the seed after the server is up:
+If you want to seed terminal locations after the server is up:
 
 ```bash
 uv run python -m backend.db.seed
@@ -271,89 +311,16 @@ uv run python -m backend.db.seed
 
 ---
 
-## 7. Create an Admin User
+## 6. Creating Additional Admin Users
 
-The dashboard (`GET /api/dashboard/*` and the `/api/dashboard/ws` live feed) is **admin-only**. Every new registration is created with `role = 'user'` by default, so you need to register an account and then promote it to `admin` directly in PostgreSQL.
+By default, an Admin account is provisioned:
+* **Admin Customer ID / Card Number**: `100000` (or `100002`)
+* **Password**: `admin123`
 
-### Option 1: Register from the User Portal (Recommended)
-
-Start your backend:
-
-```bash
-uv run uvicorn backend.main:app --reload --port 8008
-```
-
-Open:
-
-```
-frontend/user_portal/index.html
-```
-
-or
-
-```
-http://127.0.0.1:5501
-```
-
-(if you're serving it with `python -m http.server`).
-
-Fill in:
-- Phone Number
-- Password
-
-Click **Register**.
-
-Then continue to the PostgreSQL step below.
-
-### Option 2: Register using curl
-
-Open a terminal.
-
-**Windows PowerShell**
-
-Use `Invoke-RestMethod` (much easier than curl on Windows):
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8008/api/auth/register" `
-    -Method POST `
-    -ContentType "application/json" `
-    -Body '{"phone_number":"+201012345678","password":"123456789"}'
-```
-
-or if you want to use `curl.exe` explicitly:
-
-```powershell
-curl.exe -X POST "http://localhost:8008/api/auth/register" `
--H "Content-Type: application/json" `
--d "{\"phone_number\":\"+201012345678\",\"password\":\"123456789\"}"
-```
-
-If registration succeeds you'll receive something like:
-
-```json
-{
-  "customer_id": 5,
-  "access_token": "...",
-  "token_type": "bearer"
-}
-```
-
-Write down the `customer_id`.
-
-### Promote the user to admin
-
-Since you're using PostgreSQL inside Docker, enter the container:
+To promote any registered customer (`role = 'user'`) to `admin` in PostgreSQL:
 
 ```bash
 docker exec -it fraud-postgres psql -U postgres -d fraud_db
-```
-
-or
-
-```bash
-docker exec -it fraud-postgres bash
-psql -U postgres -d fraud_db
 ```
 
 Then execute:
@@ -361,24 +328,13 @@ Then execute:
 ```sql
 UPDATE customers
 SET role = 'admin'
-WHERE customer_id = 5;
+WHERE customer_id = <CUSTOMER_ID>;
 ```
-
-Replace `5` with the `customer_id` returned during registration.
 
 Verify it:
 
 ```sql
-SELECT customer_id, phone_number, role
-FROM customers;
-```
-
-You should see:
-
-```
- customer_id | phone_number  | role
--------------+---------------+-------
-5            | +201012345678 | admin
+SELECT customer_id, phone_number, role FROM customers WHERE role = 'admin';
 ```
 
 Exit PostgreSQL:
