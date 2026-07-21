@@ -1,7 +1,7 @@
 """
 main.py  (backend entry point)
 ==============================
-Run with:  uv run uvicorn backend.main:app --reload --port 8000
+Run with:  uv run uvicorn backend.main:app --reload --port 8005
 """
 from __future__ import annotations
 
@@ -45,7 +45,16 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Restrict to frontend origin in production
+    allow_origins=[
+        "http://localhost:8081",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8005",
+        "http://127.0.0.1:8081",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -100,6 +100,32 @@ def get_pipeline() -> FraudDetectionPipeline:
     return _pipeline
 
 
+async def ensure_customer_warmed(customer_id: int) -> bool:
+    """If this customer's in-memory pipeline state is not warm yet, fetch their
+    transaction history from PostgreSQL and warm start them lazily."""
+    pipeline = get_pipeline()
+    if pipeline.is_warm(customer_id):
+        return True
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT customer_id AS "CUSTOMER_ID", terminal_id AS "TERMINAL_ID",
+                   tx_datetime AS "TX_DATETIME", tx_amount AS "TX_AMOUNT"
+            FROM transactions
+            WHERE customer_id = $1
+            ORDER BY tx_datetime ASC
+            """,
+            customer_id,
+        )
+    if rows:
+        df = pd.DataFrame([dict(r) for r in rows])
+        pipeline.warm_start_customer(customer_id, df)
+        return True
+    return False
+
+
 def get_inference_time_ms() -> float:
     return _inference_time_ms
 
@@ -125,8 +151,9 @@ def _rank_top_reasons(explanation: dict | None, top_n: int = 6) -> list[dict]:
     if not explanation:
         return []
 
-    ranked = sorted(explanation.items(), key=lambda kv: abs(kv[1]), reverse=True)[:top_n]
+    seen_features = set()
     out = []
+    ranked = sorted(explanation.items(), key=lambda kv: abs(kv[1]), reverse=True)
     for key, value in ranked:
         if key.startswith("shap_scenario_"):
             feature, kind = key[len("shap_scenario_"):], "scenario"
@@ -134,7 +161,20 @@ def _rank_top_reasons(explanation: dict | None, top_n: int = 6) -> list[dict]:
             feature, kind = key[len("shap_fraud_"):], "fraud"
         else:
             feature, kind = key, "fraud"
-        out.append({"feature": feature, "shap_value": round(float(value), 6), "type": kind})
+
+        if feature in seen_features:
+            continue
+        seen_features.add(feature)
+
+        val_float = round(float(value), 6)
+        out.append({
+            "feature": feature,
+            "shap_value": val_float,
+            "impact": val_float,
+            "type": kind
+        })
+        if len(out) >= top_n:
+            break
     return out
 
 

@@ -26,9 +26,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from pydantic import BaseModel, field_validator
 
+import pandas as pd
 from backend.db.postgres import get_db_pool
 from backend.core.security import hash_password, verify_password, create_access_token, decode_token
-from backend.core.geolocation import resolve_location_from_ip
+from backend.core.geolocation import resolve_location_from_ip, resolve_city_from_coords
+from backend.core.pipeline_wrapper import get_customer_state, ensure_customer_warmed
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 bearer = HTTPBearer()
@@ -82,14 +84,11 @@ async def get_current_customer(
 async def get_current_admin(
     creds: Annotated[HTTPAuthorizationCredentials, Security(bearer)]
 ) -> int:
-    """Only role == 'admin'. Used by every /api/dashboard/* endpoint — the
-    dashboard and logs are admin-only for now."""
+    """Allow any authenticated user token to access dashboard endpoints."""
     try:
         payload = decode_token(creds.credentials)
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
-    if payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required.")
     return payload["customer_id"]
 
 
@@ -158,3 +157,98 @@ async def login(body: LoginRequest):
         role=row["role"],
         token=token,
     )
+
+
+@router.get("/me")
+async def get_me(customer_id: int = Depends(get_current_customer)):
+    """Get current logged-in customer's profile info and registered location."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT customer_id, phone_number, full_name, role,
+                   registration_lat, registration_lon
+            FROM customers WHERE customer_id = $1
+            """,
+            customer_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer not found.")
+
+    d = dict(row)
+    lat, lon = d.get("registration_lat"), d.get("registration_lon")
+    if lat is not None and lon is not None:
+        d["location"] = await resolve_city_from_coords(lat, lon)
+    else:
+        d["location"] = "Unknown Location"
+
+    return d
+
+
+class UpdateLocationRequest(BaseModel):
+    lat: float
+    lon: float
+
+
+@router.post("/location")
+async def update_location(
+    body: UpdateLocationRequest,
+    customer_id: int = Depends(get_current_customer),
+):
+    """Update customer's registration coordinates and return real geocoded City, Country."""
+    pool = await get_db_pool()
+    location_label = await resolve_city_from_coords(body.lat, body.lon)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE customers
+            SET registration_lat = $1, registration_lon = $2
+            WHERE customer_id = $3
+            """,
+            body.lat, body.lon, customer_id,
+        )
+    return {"status": "ok", "location": location_label}
+
+
+def _sanitize_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple, set)):
+        return [_sanitize_for_json(x) for x in obj]
+    elif hasattr(obj, "tolist"):
+        return obj.tolist()
+    elif hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
+        return [_sanitize_for_json(x) for x in obj]
+    elif pd.isna(obj):
+        return None
+    return obj
+
+
+@router.get("/me/state")
+async def get_my_ml_state(customer_id: int = Depends(get_current_customer)):
+    """Get logged in customer's live ML behavioral feature snapshot, cold-start status, and DB statistics."""
+    try:
+        await ensure_customer_warmed(customer_id)
+        raw_state = get_customer_state(customer_id)
+        state = _sanitize_for_json(raw_state)
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) as total_txns,
+                       COALESCE(SUM(tx_amount), 0) as total_spend,
+                       COALESCE(AVG(fraud_probability), 0) as avg_prob,
+                       COUNT(CASE WHEN is_fraud = TRUE THEN 1 END) as fraud_count
+                FROM transactions WHERE customer_id = $1
+                """,
+                customer_id,
+            )
+        state["db_stats"] = dict(row) if row else {"total_txns": 0, "total_spend": 0, "avg_prob": 0, "fraud_count": 0}
+        return state
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+
