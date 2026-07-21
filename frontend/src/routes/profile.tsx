@@ -133,8 +133,9 @@ function ProfilePage() {
 
   const stats = useMemo(() => {
     const total = mlState?.db_stats?.total_txns ?? txHistory.length;
-    const spend = mlState?.db_stats?.total_spend ?? txHistory.reduce((a, b) => a + b.tx_amount, 0);
-    const flagged = mlState?.db_stats?.fraud_count ?? txHistory.filter((t) => t.is_fraud || t.fraud_probability > 0.55).length;
+    const approvedTxns = txHistory.filter((t) => t.status === "APPROVED" || t.status === "VERIFIED");
+    const spend = mlState?.db_stats?.total_spend ?? approvedTxns.reduce((a, b) => a + b.tx_amount, 0);
+    const flagged = mlState?.db_stats?.fraud_count ?? txHistory.filter((t) => t.is_fraud || t.status === "DECLINED" || t.fraud_probability > 0.55).length;
     const verified = txHistory.filter((t) => t.status === "VERIFIED").length;
     
     // Real model risk score (0-100) based on average fraud probability

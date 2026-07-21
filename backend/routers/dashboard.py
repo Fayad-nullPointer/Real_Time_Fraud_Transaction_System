@@ -344,36 +344,55 @@ Your reports are read by compliance officers and security teams.
 Use markdown formatting for structure. Be precise and data-driven.
 Do not speculate beyond what the data shows. Reference specific SHAP values when explaining contributing factors."""
 
-    # ── Call OpenRouter API ───────────────────────────────────────────────
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:3000",
-                    "X-Title": "Sentinel Fraud Detection System",
-                },
-                json={
-                    "model": "meta-llama/llama-3.1-8b-instruct:free",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                    "max_tokens": 1024,
-                    "temperature": 0.3,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as exc:
+    # ── Call OpenRouter API with Fallback Models ────────────────────────
+    # Try active free models on OpenRouter, falling back to paid slug if needed
+    candidate_models = [
+        os.environ.get("OPEN_ROUTER_MODEL", "").strip(),
+        "google/gemini-2.0-flash-lite-preview-02-05:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "meta-llama/llama-3.1-8b-instruct",
+    ]
+    candidate_models = [m for m in candidate_models if m]
+
+    data = None
+    last_err = None
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for model in candidate_models:
+            try:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:3000",
+                        "X-Title": "Sentinel Fraud Detection System",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user",   "content": user_prompt},
+                        ],
+                        "max_tokens": 1024,
+                        "temperature": 0.3,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    break
+                else:
+                    last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            except Exception as exc:
+                last_err = str(exc)
+
+    if data is None:
         raise HTTPException(
             status_code=502,
-            detail=f"OpenRouter API returned {exc.response.status_code}: {exc.response.text[:300]}",
+            detail=f"OpenRouter API failed for all models: {last_err}",
         )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to reach OpenRouter: {exc}")
 
     report_text = (
         data.get("choices", [{}])[0]
@@ -576,8 +595,8 @@ async def customer_profile(customer_id: int, _: dict = Depends(get_current_admin
             """
             SELECT
                 COUNT(*)                              AS total_txns,
-                COALESCE(AVG(tx_amount), 0)            AS mean_amount,
-                COALESCE(STDDEV_POP(tx_amount), 0)     AS std_amount,
+                COALESCE(AVG(tx_amount) FILTER (WHERE status IN ('APPROVED', 'VERIFIED')), 0)        AS mean_amount,
+                COALESCE(STDDEV_POP(tx_amount) FILTER (WHERE status IN ('APPROVED', 'VERIFIED')), 0) AS std_amount,
                 COALESCE(AVG(fraud_probability), 0)    AS avg_fraud_probability,
                 COUNT(*) FILTER (WHERE status = 'DECLINED') AS confirmed_fraud_count,
                 COUNT(DISTINCT terminal_id)             AS terminals_used,

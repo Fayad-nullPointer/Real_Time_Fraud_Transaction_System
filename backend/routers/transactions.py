@@ -207,8 +207,13 @@ async def create_transaction(
     })
 
     if result["is_fraud"]:
-        # Generate and store OTP, Twilio alert is sent inside pipeline
-        otp = generate_otp()
+        # Retrieve the exact OTP generated for WhatsApp by the pipeline
+        pipeline = get_pipeline()
+        otp = pipeline._pending_otps.get(tx_id)
+        if not otp:
+            otp = generate_otp()
+            pipeline._pending_otps[tx_id] = otp
+
         await store_otp(tx_id, otp, ttl=OTP_TTL_SECONDS)
         return {
             "transaction_id": tx_id,
@@ -251,7 +256,11 @@ async def verify_transaction(
     if tx["status"] != "PENDING_OTP":
         raise HTTPException(status_code=400, detail=f"Transaction is already in status '{tx['status']}'.")
 
-    otp_valid = await verify_otp(body.transaction_id, body.otp_code)
+    # Check both Redis and pipeline internal state for the exact WhatsApp OTP
+    pipeline = get_pipeline()
+    otp_valid_redis = await verify_otp(body.transaction_id, body.otp_code)
+    otp_valid_pipeline = pipeline.confirm_transaction_otp(body.transaction_id, body.otp_code)
+    otp_valid = otp_valid_redis or otp_valid_pipeline
 
     new_status = "VERIFIED" if otp_valid else "DECLINED"
 

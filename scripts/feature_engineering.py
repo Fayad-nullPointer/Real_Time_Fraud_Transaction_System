@@ -855,30 +855,29 @@ class FraudFeatureEngineer:
             t_state.recent_tx_times.popleft()
             t_state.recent_customers.popleft()
 
-        # --- new-customer cold start: learn their real stats online ------
-        # Welford's algorithm — O(1) per transaction, numerically stable,
-        # no retraining. Only runs for customers still on a population
-        # default; once promoted they're indistinguishable from any other
-        # known customer.
         # --- Online baseline maintenance (Welford's algorithm) ---
-        state.running_n += 1
-        delta = amount - state.running_mean
-        state.running_mean += delta / state.running_n
-        state.running_m2 += delta * (amount - state.running_mean)
+        # Only update baseline mean/std if transaction is NOT fraud/declined
+        # AND only for cold-start customers learning their baseline profile.
+        # Established customers keep their constant baseline mean/std profile.
+        is_fraud = bool(tx.get("is_fraud", False)) or tx.get("status") == "DECLINED"
+        if not is_fraud and cust_id in self._cold_start_ids:
+            state.running_n += 1
+            delta = amount - state.running_mean
+            state.running_mean += delta / state.running_n
+            state.running_m2 += delta * (amount - state.running_mean)
 
-        observed_std = (
-            float(np.sqrt(state.running_m2 / (state.running_n - 1)))
-            if state.running_n > 1 else float(self.global_defaults_["std_amount"])
-        )
-        observed_std = observed_std if (observed_std and not np.isnan(observed_std)) else float(self.global_defaults_["std_amount"])
+            observed_std = (
+                float(np.sqrt(state.running_m2 / (state.running_n - 1)))
+                if state.running_n > 1 else float(self.global_defaults_["std_amount"])
+            )
+            observed_std = observed_std if (observed_std and not np.isnan(observed_std)) else float(self.global_defaults_["std_amount"])
 
-        if cust_id not in self.customer_profiles_.index:
-            self.register_new_customer(cust_id)
+            if cust_id not in self.customer_profiles_.index:
+                self.register_new_customer(cust_id)
 
-        self.customer_profiles_.loc[cust_id, "mean_amount"] = round(state.running_mean, 2)
-        self.customer_profiles_.loc[cust_id, "std_amount"] = round(observed_std, 2)
+            self.customer_profiles_.loc[cust_id, "mean_amount"] = round(state.running_mean, 2)
+            self.customer_profiles_.loc[cust_id, "std_amount"] = round(observed_std, 2)
 
-        if cust_id in self._cold_start_ids:
             if state.running_n >= self.COLD_START_PROMOTE_AFTER:
                 tier = pd.cut(
                     [state.running_mean], bins=self.tier_bins_,

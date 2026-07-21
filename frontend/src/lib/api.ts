@@ -5,6 +5,9 @@ const BASE = import.meta.env.VITE_API_URL ?? "";
 // Token / session helpers  (localStorage is client-only; guard for SSR)
 // Dual-token isolation so Customer Portal and Admin Dashboard run in separate tabs independently
 // ---------------------------------------------------------------------------
+// Global OTP Timeout (in seconds) — shared across backend and frontend
+export const OTP_TTL_SECONDS = 40;
+
 const isBrowser = typeof window !== "undefined";
 
 export const getAdminToken = (): string | null =>

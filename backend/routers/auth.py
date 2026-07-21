@@ -238,7 +238,7 @@ async def get_my_ml_state(customer_id: int = Depends(get_current_customer)):
             row = await conn.fetchrow(
                 """
                 SELECT COUNT(*) as total_txns,
-                       COALESCE(SUM(tx_amount), 0) as total_spend,
+                       COALESCE(SUM(CASE WHEN status IN ('APPROVED', 'VERIFIED') THEN tx_amount ELSE 0 END), 0) as total_spend,
                        COALESCE(AVG(fraud_probability), 0) as avg_prob,
                        COUNT(CASE WHEN is_fraud = TRUE THEN 1 END) as fraud_count
                 FROM transactions WHERE customer_id = $1

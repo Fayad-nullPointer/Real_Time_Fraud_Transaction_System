@@ -8,7 +8,7 @@ import {
 import { toast } from "sonner";
 import {
   txApi, terminalApi, authApi, getCustomer, clearCustomerToken, clearCustomer,
-  type ApiTerminal, type TxHistoryItem,
+  OTP_TTL_SECONDS, type ApiTerminal, type TxHistoryItem,
 } from "@/lib/api";
 import { GoogleTerminalMap } from "@/components/GoogleTerminalMap";
 
@@ -180,7 +180,6 @@ function PayPage() {
   // OTP countdown effect
   useEffect(() => {
     if (phase === "otp") {
-      setOtpSeconds(300);
       countdownRef.current = setInterval(() => {
         setOtpSeconds((prev) => {
           if (prev <= 1) {
@@ -238,6 +237,7 @@ function PayPage() {
           contributions,
         });
         setOtp("");
+        setOtpSeconds(res.otp_expires_in ?? OTP_TTL_SECONDS);
         refreshHistory();
         // Automatically pop up the OTP Modal Window!
         setPhase("otp");
