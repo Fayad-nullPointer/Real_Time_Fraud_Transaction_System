@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     status TEXT NOT NULL DEFAULT 'PENDING',
     shap_explanation TEXT,
     otp_expires_at TEXT,
+    llm_report TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -192,6 +193,11 @@ async def apply_schema() -> None:
             for stmt in SQLITE_SCHEMA.split(";"):
                 if stmt.strip():
                     await conn.execute(stmt)
+            # Migrate: add llm_report column if it doesn't exist yet
+            try:
+                await conn.execute("ALTER TABLE transactions ADD COLUMN llm_report TEXT")
+            except Exception:
+                pass  # column already exists
         print("[sqlite] SQLite schema applied successfully.")
     else:
         schema_path = Path(__file__).parent / "schema.sql"

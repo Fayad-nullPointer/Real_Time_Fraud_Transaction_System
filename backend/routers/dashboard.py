@@ -28,6 +28,7 @@ import re
 import time
 from pathlib import Path
 import psutil
+import httpx
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -257,7 +258,7 @@ async def transaction_detail(transaction_id: str, _: dict = Depends(get_current_
             """
             SELECT transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
                    is_fraud, fraud_probability, scenario_id, scenario_name,
-                   top_reason, status, shap_explanation
+                   top_reason, status, shap_explanation, llm_report
             FROM transactions
             WHERE transaction_id = $1
             """,
@@ -269,6 +270,126 @@ async def transaction_detail(transaction_id: str, _: dict = Depends(get_current_
     d = dict(row)
     d["shap_explanation"] = _parse_shap(d.get("shap_explanation"))
     return d
+
+
+@router.post("/transactions/{transaction_id}/generate-report")
+async def generate_llm_report(transaction_id: str, _: dict = Depends(get_current_admin)):
+    """
+    Generate an AI incident report for a specific transaction using
+    OpenRouter (LLM).  The report is persisted in the `llm_report`
+    column so subsequent requests return the cached version instantly.
+    """
+    api_key = os.environ.get("OPEN_ROUTER_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPEN_ROUTER_API_KEY not configured on the server.")
+
+    # ── Fetch transaction context ────────────────────────────────────────
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
+                   is_fraud, fraud_probability, scenario_id, scenario_name,
+                   top_reason, status, shap_explanation, llm_report
+            FROM transactions
+            WHERE transaction_id = $1
+            """,
+            transaction_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+
+    tx = dict(row)
+
+    # Return cached report if it already exists
+    if tx.get("llm_report"):
+        return {"llm_report": tx["llm_report"], "cached": True}
+
+    # ── Build the context for the LLM ────────────────────────────────────
+    shap_data = _parse_shap(tx.get("shap_explanation"))
+    shap_summary = "\n".join(
+        f"  - {item.get('feature', 'Unknown')}: SHAP value {item.get('shap_value', item.get('impact', 0)):.4f} ({item.get('type', 'fraud')})"
+        for item in (shap_data if isinstance(shap_data, list) else [])
+    ) or "  No SHAP data available."
+
+    tx_datetime_str = str(tx.get("tx_datetime", "Unknown"))
+
+    user_prompt = f"""Analyze the following transaction and write a professional incident report:
+
+**Transaction Details:**
+- Transaction ID: {tx['transaction_id']}
+- Customer ID: {tx['customer_id']}
+- Terminal ID: {tx['terminal_id']}
+- Amount: ${float(tx['tx_amount']):.2f}
+- Date/Time: {tx_datetime_str}
+- Fraud Probability: {float(tx.get('fraud_probability', 0)) * 100:.1f}%
+- Model Decision: {'FRAUDULENT' if tx.get('is_fraud') else 'LEGITIMATE'}
+- Fraud Scenario: {tx.get('scenario_name') or 'None detected'}
+- Current Status: {tx.get('status', 'UNKNOWN')}
+- Top Flagging Reason: {tx.get('top_reason') or 'N/A'}
+
+**SHAP Feature Contributions (why the model flagged this):**
+{shap_summary}
+
+Please write a concise but thorough incident report covering:
+1. Executive Summary (2-3 sentences)
+2. Risk Assessment (severity level and confidence)
+3. Key Contributing Factors (based on SHAP values)
+4. Recommended Actions
+5. Conclusion"""
+
+    system_prompt = """You are a Senior Financial Fraud Analyst at a major bank's fraud investigation unit.
+You write clear, professional incident reports for flagged transactions.
+Your reports are read by compliance officers and security teams.
+Use markdown formatting for structure. Be precise and data-driven.
+Do not speculate beyond what the data shows. Reference specific SHAP values when explaining contributing factors."""
+
+    # ── Call OpenRouter API ───────────────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost:3000",
+                    "X-Title": "Sentinel Fraud Detection System",
+                },
+                json={
+                    "model": "meta-llama/llama-3.1-8b-instruct:free",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    "max_tokens": 1024,
+                    "temperature": 0.3,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenRouter API returned {exc.response.status_code}: {exc.response.text[:300]}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach OpenRouter: {exc}")
+
+    report_text = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "Report generation failed — no content returned.")
+    )
+
+    # ── Persist the report ────────────────────────────────────────────────
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE transactions SET llm_report = $2 WHERE transaction_id = $1",
+            transaction_id,
+            report_text,
+        )
+
+    return {"llm_report": report_text, "cached": False}
 
 
 @router.get("/system")

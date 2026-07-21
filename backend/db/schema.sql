@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS transactions (
 -- just closes the tab and the client-side countdown never fires).
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMPTZ;
 
+-- ---- SHAP explanation (added) -------------------------------------------
+-- Ranked list of features that contributed most to fraud_probability.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS shap_explanation JSONB;
+
+-- ---- LLM report (added) -------------------------------------------------
+-- Persisted, on-demand AI-generated incident report produced by calling
+-- OpenRouter (LLM) with the transaction context + SHAP explanation.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS llm_report TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_tx_customer  ON transactions(customer_id);
 CREATE INDEX IF NOT EXISTS idx_tx_terminal  ON transactions(terminal_id);
 CREATE INDEX IF NOT EXISTS idx_tx_datetime  ON transactions(tx_datetime DESC);

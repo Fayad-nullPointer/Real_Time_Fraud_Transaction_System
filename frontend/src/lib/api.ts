@@ -146,6 +146,7 @@ export interface DashTx {
 export interface DashTxDetail extends DashTx {
   scenario_id: number | null;
   shap_explanation: { feature: string; value: number; impact: number }[];
+  llm_report: string | null;
 }
 
 export interface SystemHealth {
@@ -409,4 +410,11 @@ export const dashboardApi = {
     apiFetch<LogEntry[]>(`/api/dashboard/logs?limit=${limit}&level=${level}`, {}, true),
 
   reports: () => apiFetch<DashReport[]>("/api/dashboard/reports", {}, true),
+
+  generateReport: (transactionId: string) =>
+    apiFetch<{ llm_report: string; cached: boolean }>(
+      `/api/dashboard/transactions/${transactionId}/generate-report`,
+      { method: "POST" },
+      true,
+    ),
 };
