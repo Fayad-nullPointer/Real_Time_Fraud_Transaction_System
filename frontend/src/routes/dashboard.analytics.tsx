@@ -83,7 +83,7 @@ function AnalyticsPage() {
         <ChartCard
           title="Fraud probability histogram"
           subtitle="Distribution of scores"
-          explanation="Groups transactions by their AI risk score from 0.0 (100% Safe) to 1.0 (100% Fraud). High bars on the left mean most payments are legitimate; bars on the far right show high-risk payments flagged by Sentinel ML."
+          explanation="Groups transactions by their AI risk score from 0.0 (100% Safe) to 1.0 (100% Fraud). High bars on the left mean most payments are legitimate; bars on the far right show high-risk payments flagged by VanGuard Shield ML."
         >
           <ResponsiveContainer>
             <BarChart data={charts.prob_histogram}>
@@ -155,7 +155,7 @@ function AnalyticsPage() {
         <ChartCard
           title="Model prediction distribution"
           subtitle="Last 24h"
-          explanation="Breakdown of Sentinel AI decisions today: Blue = Approved immediately; Amber = Paused for 2FA OTP verification; Red = Auto-declined high risk."
+          explanation="Breakdown of VanGuard Shield AI decisions today: Blue = Approved immediately; Amber = Paused for 2FA OTP verification; Red = Auto-declined high risk."
           small
         >
           <ResponsiveContainer>

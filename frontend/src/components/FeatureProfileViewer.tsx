@@ -162,8 +162,8 @@ export function FeatureProfileViewer({ mlState }: { mlState: CustomerMlState | n
             </div>
             <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
               {isColdStart
-                ? `You have completed ${totalTxnsCount} transaction(s). Sentinel ML is actively running Welford online learning to construct your personal baseline spending mean ($${profile?.mean_amount?.toFixed(2) ?? "0.00"}) before promoting you out of cold-start mode.`
-                : `Sentinel ML has learned your unique behavioral patterns across your ${totalTxnsCount} transactions (historical mean: $${profile?.mean_amount?.toFixed(2) ?? "0.00"}, spending variance: $${profile?.std_amount?.toFixed(2) ?? "0.00"}) and evaluates every new purchase against your personal baseline.`}
+                ? `You have completed ${totalTxnsCount} transaction(s). VanGuard Shield ML is actively running Welford online learning to construct your personal baseline spending mean ($${profile?.mean_amount?.toFixed(2) ?? "0.00"}) before promoting you out of cold-start mode.`
+                : `VanGuard Shield ML has learned your unique behavioral patterns across your ${totalTxnsCount} transactions (historical mean: $${profile?.mean_amount?.toFixed(2) ?? "0.00"}, spending variance: $${profile?.std_amount?.toFixed(2) ?? "0.00"}) and evaluates every new purchase against your personal baseline.`}
             </p>
           </div>
         </div>

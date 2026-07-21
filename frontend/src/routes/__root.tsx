@@ -78,9 +78,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Sentinel — AI Credit Card Fraud Detection Platform" },
+      { title: "VanGuard Shield — AI Credit Card Fraud Detection Platform" },
       { name: "description", content: "Real-time, AI-powered credit card fraud detection with adaptive OTP verification, live monitoring and enterprise analytics." },
-      { property: "og:title", content: "Sentinel — AI Credit Card Fraud Detection" },
+      { property: "og:title", content: "VanGuard Shield — AI Credit Card Fraud Detection" },
       { property: "og:description", content: "Enterprise fraud detection platform with live monitoring, adaptive OTP and analyst dashboards." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

@@ -70,11 +70,9 @@ function RegisterPage() {
     <div className="relative min-h-screen overflow-hidden">
       <NetworkBackdrop />
       <div className="relative mx-auto flex min-h-screen max-w-md flex-col justify-center px-6 py-16">
-        <Link to="/" className="mb-8 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
-          <div className="grid h-8 w-8 place-items-center rounded-lg bg-[image:var(--gradient-primary)]">
-            <ShieldCheck className="h-4 w-4 text-white" />
-          </div>
-          Sentinel
+        <Link to="/" className="mb-8 inline-flex items-center gap-3 text-sm text-muted-foreground hover:text-foreground">
+          <img src="/vanguard-logo.png" alt="VanGuard Shield" className="h-10 w-auto object-contain" />
+          <span className="font-semibold text-lg text-foreground">VanGuard Shield</span>
         </Link>
 
         {step !== "done" ? (

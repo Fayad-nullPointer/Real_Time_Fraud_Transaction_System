@@ -172,7 +172,7 @@ function Landing() {
 
       <footer className="border-t border-white/5">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-6 py-8 text-xs text-muted-foreground md:flex-row">
-          <div>© {new Date().getFullYear()} Sentinel — AI Fraud Detection Platform</div>
+          <div>© {new Date().getFullYear()} VanGuard Shield — AI Fraud Detection Platform</div>
           <div>Demo environment · Do not use with production card data</div>
         </div>
       </footer>
@@ -260,7 +260,7 @@ function DashboardMock() {
         <div className="h-2.5 w-2.5 rounded-full bg-[color:var(--warning)]/70" />
         <div className="h-2.5 w-2.5 rounded-full bg-[color:var(--success)]/70" />
         <div className="ml-3 flex items-center gap-1.5 rounded-md border border-white/5 bg-black/30 px-2 py-0.5 text-[11px] text-muted-foreground">
-          <Lock className="h-3 w-3" /> sentinel.ai <span className="text-white/30">/</span> dashboard
+          <Lock className="h-3 w-3" /> vanguard-shield.ai <span className="text-white/30">/</span> dashboard
         </div>
       </div>
 

@@ -64,11 +64,9 @@ function DashboardLayout() {
         <aside
           className={`sticky top-0 hidden h-screen shrink-0 border-r border-white/5 bg-[color:var(--sidebar)]/70 backdrop-blur-xl transition-[width] md:block ${collapsed ? "w-16" : "w-64"}`}
         >
-          <div className="flex h-16 items-center gap-2 border-b border-white/5 px-4">
-            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[image:var(--gradient-primary)]">
-              <ShieldCheck className="h-4 w-4 text-white" />
-            </div>
-            {!collapsed && <div className="font-semibold">Sentinel</div>}
+          <div className="flex h-16 items-center gap-2.5 border-b border-white/5 px-4">
+            <img src="/vanguard-logo.png" alt="VanGuard Shield" className="h-8 w-auto shrink-0 object-contain" />
+            {!collapsed && <div className="font-semibold tracking-tight text-sm">VanGuard Shield</div>}
             {!collapsed && <span className="ml-auto rounded-md border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">Analyst</span>}
           </div>
           <nav className="flex flex-col gap-1 p-3">

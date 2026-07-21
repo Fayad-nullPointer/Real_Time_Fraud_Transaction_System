@@ -178,11 +178,9 @@ function ProfilePage() {
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-white/5 bg-[color:var(--background)]/70 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-          <Link to="/" className="flex items-center gap-2">
-            <div className="grid h-8 w-8 place-items-center rounded-lg bg-[image:var(--gradient-primary)]">
-              <ShieldCheck className="h-4 w-4 text-white" />
-            </div>
-            <span className="font-semibold">Sentinel</span>
+          <Link to="/" className="flex items-center gap-2.5">
+            <img src="/vanguard-logo.png" alt="VanGuard Shield" className="h-7 w-auto object-contain" />
+            <span className="font-semibold">VanGuard Shield</span>
             <span className="ml-1 text-xs text-muted-foreground">Customer Portal</span>
           </Link>
           <div className="flex items-center gap-2">
