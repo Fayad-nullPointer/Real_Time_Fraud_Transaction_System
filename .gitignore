@@ -18,3 +18,4 @@ data/
 credintials/
 logs/
 *.log
+node_modules/
