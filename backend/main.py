@@ -27,6 +27,12 @@ async def lifespan(app: FastAPI):
     await check_redis_connection()
     print("[startup] Applying DB schema...")
     await apply_schema()
+    print("[startup] Seeding terminals dataset...")
+    try:
+        from backend.db.seed import seed_terminals
+        await seed_terminals()
+    except Exception as e:
+        print(f"[startup] Warning: Terminal seeding note: {e}")
     print("[startup] Loading ML pipeline...")
     load_pipeline()
     await warm_start_pipeline(hours=48)   # <-- new
