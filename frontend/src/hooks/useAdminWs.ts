@@ -17,10 +17,9 @@ export type WsEvent = {
 
 function getWsBase(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL as string;
-  // Evaluated lazily (client-only) to avoid SSR crashes where window is undefined
-  if (typeof window === "undefined") return "ws://localhost:8005";
-  return (window.location.protocol === "https:" ? "wss:" : "ws:") +
-    "//" + (import.meta.env.VITE_API_HOST ?? window.location.host);
+  if (typeof window === "undefined") return "ws://backend:8000";
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.hostname}:8005`;
 }
 
 export function useAdminWs(onEvent?: (ev: WsEvent) => void) {

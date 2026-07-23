@@ -1,5 +1,10 @@
-// Base URL - uses Vite env var or relative path (proxied by Vite in dev)
-const BASE = import.meta.env.VITE_API_URL ?? "";
+const getApiBase = (): string => {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8005`;
+  }
+  return "http://backend:8000";
+};
 
 // ---------------------------------------------------------------------------
 // Token / session helpers  (localStorage is client-only; guard for SSR)
@@ -273,7 +278,7 @@ async function apiFetch<T>(
     }
   }
 
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await fetch(`${getApiBase()}${path}`, {
     ...options,
     headers,
   });
