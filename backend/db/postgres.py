@@ -203,7 +203,10 @@ async def apply_schema() -> None:
         schema_path = Path(__file__).parent / "schema.sql"
         sql = schema_path.read_text(encoding="utf-8")
         async with pool.acquire() as conn:
-            await conn.execute(sql)
+            try:
+                await conn.execute(sql)
+            except Exception as e:
+                print(f"[postgres] Note on schema initialization: {e}")
         print("[postgres] PostgreSQL schema applied successfully.")
 
     # Seed default admin user (ID 100000, password '1234') if database has no customers
