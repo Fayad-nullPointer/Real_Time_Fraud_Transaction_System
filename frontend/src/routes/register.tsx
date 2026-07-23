@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { NetworkBackdrop } from "@/components/network-backdrop";
 import { authApi, setToken, setCustomer } from "@/lib/api";
+import { resolveUserLocation } from "@/lib/geo";
 
 export const Route = createFileRoute("/register")({
   component: RegisterPage,
@@ -26,18 +27,7 @@ function RegisterPage() {
       return;
     }
     setStep("locating");
-    const getLoc = new Promise<{ lat: number; lng: number }>((resolve) => {
-      if (!("geolocation" in navigator)) {
-        resolve({ lat: 40.7128, lng: -74.006 });
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(
-        (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-        () => resolve({ lat: 40.7128, lng: -74.006 }),
-        { timeout: 5000 }
-      );
-    });
-    const c = await getLoc;
+    const c = await resolveUserLocation();
     setCoords(c);
     let formattedPhone = phone.trim();
     if (!formattedPhone.startsWith("+")) {

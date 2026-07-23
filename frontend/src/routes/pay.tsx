@@ -10,6 +10,7 @@ import {
   txApi, terminalApi, authApi, getCustomer, clearCustomerToken, clearCustomer,
   OTP_TTL_SECONDS, type ApiTerminal, type TxHistoryItem,
 } from "@/lib/api";
+import { resolveUserLocation } from "@/lib/geo";
 import { GoogleTerminalMap } from "@/components/GoogleTerminalMap";
 
 export const Route = createFileRoute("/pay")({
@@ -141,23 +142,16 @@ function PayPage() {
     refreshProfile();
     refreshHistory();
 
-    if ("geolocation" in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (p) => {
-          const coords = { lat: p.coords.latitude, lon: p.coords.longitude };
-          setUserLoc(coords);
-          authApi.updateLocation(coords.lat, coords.lon)
-            .then((res) => {
-              if (res.location && res.location !== "Unknown") {
-                setRegLocation(res.location);
-              }
-            })
-            .catch(() => {});
-        },
-        () => {},
-        { timeout: 8000 }
-      );
-    }
+    resolveUserLocation().then((coords) => {
+      setUserLoc({ lat: coords.lat, lon: coords.lng });
+      authApi.updateLocation(coords.lat, coords.lng)
+        .then((res) => {
+          if (res.location && res.location !== "Unknown") {
+            setRegLocation(res.location);
+          }
+        })
+        .catch(() => {});
+    });
   }, [refreshProfile, refreshHistory]);
 
   const filtered = useMemo(() => {
