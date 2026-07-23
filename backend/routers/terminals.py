@@ -25,4 +25,18 @@ async def list_terminals():
             ORDER BY terminal_id
             """
         )
+        if not rows:
+            try:
+                from backend.db.seed import seed_terminals
+                await seed_terminals()
+                rows = await conn.fetch(
+                    """
+                    SELECT terminal_id, terminal_name, latitude, longitude
+                    FROM terminals
+                    WHERE is_active = TRUE
+                    ORDER BY terminal_id
+                    """
+                )
+            except Exception as e:
+                print(f"[terminals] Auto-seed note: {e}")
     return [dict(r) for r in rows]
