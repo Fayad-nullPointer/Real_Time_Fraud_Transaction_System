@@ -1,59 +1,34 @@
 # Dockerfile.backend
 # ====================
-# Multi-stage build for the FastAPI + ML fraud detection backend.
-#
-# Stage 1: Use `uv` to install Python deps into an isolated venv.
-# Stage 2: Copy the venv + source into a slim runtime image.
+FROM python:3.11-slim
 
-# ── Stage 1: Dependency install ────────────────────────────────────────────
-FROM python:3.11-slim AS builder
-
-# Install uv (fast Python package manager)
-RUN pip install --no-cache-dir uv
-
-WORKDIR /app
-
-# Copy dependency manifests first for layer caching
-COPY pyproject.toml uv.lock ./
-
-# Install all dependencies into a venv at /app/.venv
-RUN uv sync --frozen --no-dev
-
-# ── Stage 2: Runtime image ─────────────────────────────────────────────────
-FROM python:3.11-slim AS runner
-
-# Install runtime system deps
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv package manager
+RUN pip install --no-cache-dir uv
+
 WORKDIR /app
 
-# Copy virtual environment from builder
-COPY --from=builder /app/.venv /app/.venv
+# Copy dependency manifests and install into /app/.venv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
-# Copy application source
+# Copy application code and model artifacts
 COPY backend/ ./backend/
 COPY models/ ./models/
-# scripts and utils needed at runtime
 COPY scripts/ ./scripts/
 COPY utils/ ./utils/
 
-# Create logs directory
 RUN mkdir -p /app/logs
 
-# Add venv to PATH
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Non-root user
-RUN addgroup --system app && adduser --system --group app \
-    && chown -R app:app /app
-USER app
-
 EXPOSE 8000
 
-# Uvicorn with 2 workers; override via environment for scaling
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
