@@ -11,7 +11,8 @@ ARG VITE_API_HOST="localhost:8000"
 ARG VITE_WS_URL="ws://localhost:8000"
 ENV VITE_API_URL=$VITE_API_URL \
     VITE_API_HOST=$VITE_API_HOST \
-    VITE_WS_URL=$VITE_WS_URL
+    VITE_WS_URL=$VITE_WS_URL \
+    NITRO_PRESET=node-server
 
 # Install deps first (better layer caching)
 COPY package.json bun.lock* ./
@@ -21,7 +22,7 @@ RUN npm install
 COPY . .
 
 # Build the TanStack Start production bundle (Nitro output in .output/)
-RUN npm run build
+RUN NITRO_PRESET=node-server npm run build
 
 
 # ---------- Stage 2: Runtime ----------
