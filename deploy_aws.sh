@@ -48,7 +48,7 @@ sudo systemctl start docker
 
 # 4. Check for .env file
 if [ ! -f .env ]; then
-    echo "⚙️ Creating .env configuration file..."
+    echo "⚙️ Creating default .env configuration file..."
     cat <<EOT > .env
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
@@ -56,11 +56,15 @@ POSTGRES_DB=fraud_db
 DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fraud_db
 REDIS_URL=redis://redis:6379
 JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || echo "super_secret_fraud_key_2026")
+OPEN_ROUTER_API_KEY=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WHATSAPP_NUMBER=
 VITE_API_URL=
 VITE_API_HOST=
 VITE_WS_URL=
 EOT
-    echo "✅ .env file created."
+    echo "✅ .env template created. Please copy your local .env or update key values."
 fi
 
 # 5. Build and run Docker containers
