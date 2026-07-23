@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---------- Stage 1: Build ----------
-FROM oven/bun:1.1-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -14,14 +14,14 @@ ENV VITE_API_URL=$VITE_API_URL \
     VITE_WS_URL=$VITE_WS_URL
 
 # Install deps first (better layer caching)
-COPY package.json bun.lock* bunfig.toml* ./
-RUN bun install --frozen-lockfile || bun install
+COPY package.json bun.lock* ./
+RUN npm install
 
 # Copy the rest of the source
 COPY . .
 
 # Build the TanStack Start production bundle (Nitro output in .output/)
-RUN bun run build
+RUN npm run build
 
 
 # ---------- Stage 2: Runtime ----------
