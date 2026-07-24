@@ -32,6 +32,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from jose import JWTError
 
 from backend.db.postgres import get_db_pool
