@@ -136,14 +136,19 @@ def run_producer(topic: str, csv_path: Path, speed: float, max_tx: Optional[int]
         logger.error(f"Failed to read dataset for production stream: {exc}")
         return
 
-    # Convert timestamps and calculate TX_DAY to extract the test split (Day >= 140)
+    # Convert timestamps and extract test split transactions
     df["TX_DATETIME"] = pd.to_datetime(df["TX_DATETIME"])
-    t0 = df["TX_DATETIME"].min().normalize()
-    df["TX_DAY"] = (df["TX_DATETIME"] - t0).dt.days
-    
-    # Extract test split transactions sorted chronologically
-    test_df = df[df["TX_DAY"] >= 140].sort_values("TX_DATETIME").reset_index(drop=True)
-    logger.info(f"Extracted {len(test_df)} test split transactions (Day >= 140) for streaming simulation.")
+    if "TX_TIME_DAYS" in df.columns and (df["TX_TIME_DAYS"] >= 140).any():
+        test_df = df[df["TX_TIME_DAYS"] >= 140].sort_values("TX_DATETIME").reset_index(drop=True)
+    elif "TX_DAY" in df.columns and (df["TX_DAY"] >= 140).any():
+        test_df = df[df["TX_DAY"] >= 140].sort_values("TX_DATETIME").reset_index(drop=True)
+    else:
+        test_df = df.sort_values("TX_DATETIME").reset_index(drop=True)
+
+    if test_df.empty:
+        test_df = df.sort_values("TX_DATETIME").reset_index(drop=True)
+
+    logger.info(f"Loaded {len(test_df)} test transactions for streaming simulation.")
 
     # Slice the test dataframe to the limit
     stream_df = test_df.head(max_tx) if max_tx else test_df
@@ -267,21 +272,14 @@ def run_consumer(topic: str, dlq_topic: str, explain: bool, interactive: bool, m
         send_whatsapp_alerts=True
     )
     
-    # Warm start feature engineer using historical training data (Day < 140) to seed state
-    logger.info("Seeding consumer feature-engineering state (Warm Start) from historical data...")
+    # Warm start feature engineer using historical training data to seed state
+    logger.info("Seeding consumer feature-engineering state (Warm Start)...")
     try:
         df_hist = pd.read_csv(get_dataset_csv_path())
         df_hist["TX_DATETIME"] = pd.to_datetime(df_hist["TX_DATETIME"])
-        t0 = df_hist["TX_DATETIME"].min().normalize()
-        df_hist["TX_DAY"] = (df_hist["TX_DATETIME"] - t0).dt.days
-        
-        # Optimize warm start by only replaying history for the streamed customer IDs
-        test_slice = df_hist[df_hist["TX_DAY"] >= 140].sort_values("TX_DATETIME")
         limit = 100 if not max_tx else max_tx * 2
-        target_customers = test_slice["CUSTOMER_ID"].head(limit).unique().tolist()
-        
-        train_slice = df_hist[df_hist["TX_DAY"] < 140].sort_values("TX_DATETIME")
-        pipeline.warm_start_from_history(train_slice, customer_ids=target_customers)
+        target_customers = df_hist["CUSTOMER_ID"].head(limit).unique().tolist()
+        pipeline.warm_start_from_history(df_hist, customer_ids=target_customers)
         logger.info("[bold green][OK] Stateful Warm Start Seeding Completed.[/bold green]")
     except Exception as exc:
         logger.warning(f"Could not warm start feature engineer: {exc}. Pipeline will default to cold starts.")
