@@ -427,3 +427,27 @@ export const dashboardApi = {
       true,
     ),
 };
+
+export const streamApi = {
+  start: (speed = 0.8, max_tx = 100) =>
+    apiFetch<{ status: string; message: string }>("/api/dashboard/stream/start", {
+      method: "POST",
+      body: JSON.stringify({ speed, max_tx }),
+    }, true),
+
+  stop: () =>
+    apiFetch<{ status: string; message: string }>("/api/dashboard/stream/stop", {
+      method: "POST",
+    }, true),
+
+  status: () =>
+    apiFetch<{
+      is_running: boolean;
+      processed: number;
+      approved: number;
+      blocked: number;
+      fraud_count: number;
+      speed: number;
+      max_tx: number;
+    }>("/api/dashboard/stream/status", {}, true),
+};

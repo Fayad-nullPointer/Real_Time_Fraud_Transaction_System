@@ -5,6 +5,7 @@ import { useAdminWs } from "@/hooks/useAdminWs";
 import { Filter, Download, HelpCircle, Loader2, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FEATURE_EXPLANATIONS, formatFeatureKey } from "@/components/FeatureProfileViewer";
+import { KafkaStreamControl } from "@/components/KafkaStreamControl";
 
 export const Route = createFileRoute("/dashboard/live")({ component: LivePage });
 
@@ -105,6 +106,9 @@ function LivePage() {
           <button className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs hover:bg-white/10"><Download className="h-3.5 w-3.5" /> Export</button>
         </div>
       </div>
+
+      {/* GUI Kafka Stream Simulator Controller */}
+      <KafkaStreamControl />
 
       <div className="glass rounded-2xl p-5">
         <table className="w-full text-left text-sm">

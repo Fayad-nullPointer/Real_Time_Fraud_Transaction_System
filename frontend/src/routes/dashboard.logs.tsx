@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { dashboardApi, type LogEntry } from "@/lib/api";
 import { Terminal, Search, Filter, RefreshCw, ChevronDown, ChevronRight, Layers } from "lucide-react";
+import { KafkaStreamControl } from "@/components/KafkaStreamControl";
 
 export const Route = createFileRoute("/dashboard/logs")({ component: LogsPage });
 
@@ -95,6 +96,9 @@ function LogsPage() {
           </button>
         </div>
       </div>
+
+      {/* GUI Kafka Stream Simulator Controller */}
+      <KafkaStreamControl />
 
       {/* Log Terminal Container */}
       <div className="glass rounded-2xl p-4 font-mono text-xs overflow-hidden border border-white/10">

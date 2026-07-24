@@ -1102,3 +1102,162 @@ async def dashboard_ws(ws: WebSocket, token: str | None = Query(default=None)):
             await asyncio.sleep(30)
     except WebSocketDisconnect:
         ws_manager.disconnect(ws)
+
+
+# ---------------------------------------------------------------------------
+# Kafka Stream GUI Simulation Controls
+# ---------------------------------------------------------------------------
+class KafkaStreamState:
+    def __init__(self):
+        self.is_running = False
+        self.task: asyncio.Task | None = None
+        self.processed = 0
+        self.approved = 0
+        self.blocked = 0
+        self.fraud_count = 0
+        self.speed = 0.8
+        self.max_tx = 100
+
+_kafka_gui_stream = KafkaStreamState()
+
+
+class StartStreamRequest(BaseModel):
+    speed: float = 0.8
+    max_tx: int = 100
+
+
+async def _run_gui_stream_loop(speed: float, max_tx: int):
+    global _kafka_gui_stream
+    _kafka_gui_stream.is_running = True
+    _kafka_gui_stream.processed = 0
+    _kafka_gui_stream.approved = 0
+    _kafka_gui_stream.blocked = 0
+    _kafka_gui_stream.fraud_count = 0
+    _kafka_gui_stream.speed = speed
+    _kafka_gui_stream.max_tx = max_tx
+
+    csv_path = Path(__file__).resolve().parents[2] / "data" / "test_transactions_first_200.csv"
+    if not csv_path.exists():
+        csv_path = Path(__file__).resolve().parents[2] / "data" / "synthetic_fraud_transactions.csv"
+
+    if not csv_path.exists():
+        print("[gui-stream] Error: No dataset CSV found for GUI Kafka streaming.")
+        _kafka_gui_stream.is_running = False
+        return
+
+    try:
+        import pandas as pd
+        import uuid
+        df = pd.read_csv(csv_path)
+        stream_rows = df.head(max_tx).to_dict(orient="records")
+
+        pool = await get_db_pool()
+        loop = asyncio.get_running_loop()
+
+        from backend.core.pipeline_wrapper import score_transaction
+
+        for row in stream_rows:
+            if not _kafka_gui_stream.is_running:
+                break
+
+            tx_id = str(row.get("TRANSACTION_ID", uuid.uuid4()))
+            customer_id = int(row.get("CUSTOMER_ID", 100001))
+            terminal_id = int(row.get("TERMINAL_ID", 1))
+            tx_amount = float(row.get("TX_AMOUNT", 50.0))
+            tx_datetime = str(row.get("TX_DATETIME", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
+
+            tx_dict = {
+                "TRANSACTION_ID": tx_id,
+                "CUSTOMER_ID": customer_id,
+                "TERMINAL_ID": terminal_id,
+                "TX_DATETIME": tx_datetime,
+                "TX_AMOUNT": tx_amount,
+                "PHONE_NUMBER": f"+2010{customer_id:08d}",
+            }
+
+            result = await loop.run_in_executor(None, score_transaction, tx_dict)
+
+            is_fraud = bool(result["is_fraud"])
+            fraud_prob = float(result["fraud_probability"])
+            scenario_name = result.get("scenario_name")
+            status = "PENDING_OTP" if is_fraud else "APPROVED"
+
+            _kafka_gui_stream.processed += 1
+            if is_fraud:
+                _kafka_gui_stream.fraud_count += 1
+                _kafka_gui_stream.blocked += 1
+            else:
+                _kafka_gui_stream.approved += 1
+
+            now = datetime.now(timezone.utc)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO transactions (
+                        transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
+                        is_fraud, fraud_probability, scenario_id, scenario_name,
+                        top_reason, status, shap_explanation
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                    ON CONFLICT (transaction_id) DO NOTHING
+                    """,
+                    tx_id, customer_id, terminal_id, tx_amount, now,
+                    is_fraud, fraud_prob,
+                    result.get("scenario_id"), scenario_name,
+                    result.get("top_reason"), status,
+                    json.dumps(result.get("top_reasons", []))
+                )
+
+            await ws_manager.broadcast({
+                "event": "TRANSACTION",
+                "transaction_id": tx_id,
+                "customer_id": customer_id,
+                "terminal_id": terminal_id,
+                "amount": tx_amount,
+                "fraud_probability": fraud_prob,
+                "is_fraud": is_fraud,
+                "scenario_name": scenario_name,
+                "top_reason": result.get("top_reason"),
+                "top_reasons": result.get("top_reasons", []),
+                "status": status,
+                "timestamp": now.isoformat(),
+            })
+
+            await asyncio.sleep(speed)
+
+    except Exception as exc:
+        print(f"[gui-stream] Stream loop exception: {exc}")
+    finally:
+        _kafka_gui_stream.is_running = False
+
+
+@router.post("/stream/start")
+async def start_gui_kafka_stream(body: StartStreamRequest, _: dict = Depends(get_current_admin)):
+    global _kafka_gui_stream
+    if _kafka_gui_stream.is_running:
+        return {"status": "ALREADY_RUNNING", "message": "Kafka stream simulation is already running."}
+
+    _kafka_gui_stream.task = asyncio.create_task(_run_gui_stream_loop(body.speed, body.max_tx))
+    return {"status": "STARTED", "message": f"Started Kafka stream simulation ({body.max_tx} txns @ {body.speed}s)."}
+
+
+@router.post("/stream/stop")
+async def stop_gui_kafka_stream(_: dict = Depends(get_current_admin)):
+    global _kafka_gui_stream
+    _kafka_gui_stream.is_running = False
+    if _kafka_gui_stream.task:
+        _kafka_gui_stream.task.cancel()
+        _kafka_gui_stream.task = None
+    return {"status": "STOPPED", "message": "Kafka stream simulation stopped."}
+
+
+@router.get("/stream/status")
+async def get_gui_kafka_stream_status(_: dict = Depends(get_current_admin)):
+    return {
+        "is_running": _kafka_gui_stream.is_running,
+        "processed": _kafka_gui_stream.processed,
+        "approved": _kafka_gui_stream.approved,
+        "blocked": _kafka_gui_stream.blocked,
+        "fraud_count": _kafka_gui_stream.fraud_count,
+        "speed": _kafka_gui_stream.speed,
+        "max_tx": _kafka_gui_stream.max_tx,
+    }
