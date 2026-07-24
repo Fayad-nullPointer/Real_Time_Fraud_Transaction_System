@@ -226,3 +226,13 @@ async def apply_schema() -> None:
                 print("[postgres/sqlite] Seeded default admin user: ID=100000, Password=1234")
         except Exception as e:
             print(f"[postgres/sqlite] Warning: Failed to seed default admin: {e}")
+
+    # Ensure PostgreSQL sequence starts after the highest customer_id (e.g. 100001+)
+    if not _use_sqlite:
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    "SELECT setval('customers_customer_id_seq', (SELECT GREATEST(COALESCE(MAX(customer_id), 100000), 100000) FROM customers))"
+                )
+            except Exception as e:
+                print(f"[postgres] Note on sequence sync: {e}")

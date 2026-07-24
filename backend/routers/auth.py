@@ -121,9 +121,31 @@ async def register(body: RegisterRequest, request: Request):
                 body.phone_number, pw_hash, body.full_name, lat, lon, ip_addr,
             )
     except Exception as exc:
-        if "unique" in str(exc).lower():
+        err_msg = str(exc).lower()
+        if "customers_phone_number_key" in err_msg or ("phone_number" in err_msg and "unique" in err_msg):
             raise HTTPException(status_code=409, detail="Phone number already registered.")
-        raise HTTPException(status_code=500, detail=str(exc))
+        elif "customers_pkey" in err_msg or "unique" in err_msg:
+            # Sequence collision with seeded admin ID 100000 — resync sequence and retry insert
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "SELECT setval('customers_customer_id_seq', (SELECT GREATEST(COALESCE(MAX(customer_id), 100000), 100000) FROM customers))"
+                    )
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO customers (phone_number, password_hash, full_name,
+                                               registration_lat, registration_lon, registration_ip)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        RETURNING customer_id, phone_number, full_name, role
+                        """,
+                        body.phone_number, pw_hash, body.full_name, lat, lon, ip_addr,
+                    )
+            except Exception as e2:
+                if "phone_number" in str(e2).lower():
+                    raise HTTPException(status_code=409, detail="Phone number already registered.")
+                raise HTTPException(status_code=500, detail=str(e2))
+        else:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     token = create_access_token(row["customer_id"], row["role"])
     return AuthResponse(
