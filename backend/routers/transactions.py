@@ -112,6 +112,32 @@ async def create_transaction(
         ),
     }
 
+    # ── High-Velocity Rule Check ────────────────────────────────────────────────
+    # If the customer has made 2+ transactions in the past 60 seconds (making this the 3rd+),
+    # trigger high velocity fraud protection and require OTP verification.
+    async with pool.acquire() as conn:
+        vel_row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) as count_1m
+            FROM transactions
+            WHERE customer_id = $1 AND tx_datetime >= NOW() - INTERVAL '1 minute'
+            """,
+            customer_id
+        )
+    tx_count_1m = vel_row["count_1m"] if vel_row else 0
+    if tx_count_1m >= 2:
+        logger.warning(
+            f"[VELOCITY RULE] Customer {customer_id} submitted {tx_count_1m + 1} transactions within 60s -> Triggering High-Velocity Fraud OTP."
+        )
+        result["is_fraud"] = True
+        result["fraud_probability"] = max(result["fraud_probability"], 0.88)
+        result["scenario_id"] = 3
+        result["scenario_name"] = "Credential Takeover"
+        result["top_reason"] = "High Transaction Velocity (1m)"
+        existing_reasons = result.get("top_reasons", [])
+        vel_reason = {"feature": "HIGH_VELOCITY_1MIN", "shap_value": 0.65, "impact": 0.65, "type": "fraud"}
+        result["top_reasons"] = [vel_reason] + [r for r in existing_reasons if r.get("feature") != "HIGH_VELOCITY_1MIN"]
+
     # Look up ground truth from synthetic_fraud_transactions.csv
     gt_fraud, gt_scenario = lookup_ground_truth(customer_id, body.terminal_id, body.tx_amount)
 
