@@ -115,13 +115,16 @@ def print_metrics_panel(title: str = "LIVE STREAM METRICS DASHBOARD"):
 # PRODUCER THREAD
 # ---------------------------------------------------------------------- #
 def get_dataset_csv_path() -> Path:
+    p0 = DATA_DIR / "test_transactions_first_200.csv"
+    if p0.exists():
+        return p0
     p1 = DATA_DIR / "synthetic_fraud_transactions.csv"
     if p1.exists():
         return p1
     p2 = PROJECT_ROOT / "full dataset with brief" / "synthetic_fraud_transactions.csv"
     if p2.exists():
         return p2
-    return p1
+    return p0
 
 def run_producer(topic: str, csv_path: Path, speed: float, max_tx: Optional[int] = None):
     csv_path = get_dataset_csv_path()
