@@ -22,6 +22,7 @@ COPY backend/ ./backend/
 COPY models/ ./models/
 COPY scripts/ ./scripts/
 COPY utils/ ./utils/
+COPY data/ ./data/
 
 RUN mkdir -p /app/logs
 

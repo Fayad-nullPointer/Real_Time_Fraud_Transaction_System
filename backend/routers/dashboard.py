@@ -1137,21 +1137,43 @@ async def _run_gui_stream_loop(speed: float, max_tx: int):
     _kafka_gui_stream.speed = speed
     _kafka_gui_stream.max_tx = max_tx
 
-    csv_path = Path(__file__).resolve().parents[2] / "data" / "test_transactions_first_200.csv"
-    if not csv_path.exists():
-        csv_path = Path(__file__).resolve().parents[2] / "data" / "synthetic_fraud_transactions.csv"
+    import uuid
+    import random
 
-    if not csv_path.exists():
-        print("[gui-stream] Error: No dataset CSV found for GUI Kafka streaming.")
-        _kafka_gui_stream.is_running = False
-        return
+    candidate_paths = [
+        Path("/app/data/test_transactions_first_200.csv"),
+        Path(__file__).resolve().parents[2] / "data" / "test_transactions_first_200.csv",
+        Path("/app/data/synthetic_fraud_transactions.csv"),
+        Path(__file__).resolve().parents[2] / "data" / "synthetic_fraud_transactions.csv",
+        Path(__file__).resolve().parents[2] / "full dataset with brief" / "synthetic_fraud_transactions.csv",
+    ]
+    csv_path = next((p for p in candidate_paths if p.exists()), None)
+
+    stream_rows = []
+    if csv_path and csv_path.exists():
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            stream_rows = df.head(max_tx).to_dict(orient="records")
+        except Exception as e:
+            print(f"[gui-stream] Note reading CSV: {e}")
+
+    if not stream_rows:
+        # Fallback in-memory stream row generator if no CSV file exists
+        print("[gui-stream] Generating streaming transactions in-memory...")
+        now_dt = datetime.now(timezone.utc)
+        test_terminals = [1, 293, 1783, 5158, 412, 990]
+        test_customers = [100001, 14, 2522, 4193, 3572]
+        for i in range(max_tx):
+            stream_rows.append({
+                "TRANSACTION_ID": str(uuid.uuid4()),
+                "CUSTOMER_ID": random.choice(test_customers),
+                "TERMINAL_ID": random.choice(test_terminals),
+                "TX_AMOUNT": round(random.choice([25.0, 45.5, 120.0, 5000.0, 85.0]), 2),
+                "TX_DATETIME": (now_dt + timedelta(seconds=i*2)).strftime("%Y-%m-%d %H:%M:%S"),
+            })
 
     try:
-        import pandas as pd
-        import uuid
-        df = pd.read_csv(csv_path)
-        stream_rows = df.head(max_tx).to_dict(orient="records")
-
         pool = await get_db_pool()
         loop = asyncio.get_running_loop()
 
