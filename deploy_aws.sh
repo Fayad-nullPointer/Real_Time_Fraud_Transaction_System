@@ -69,6 +69,7 @@ fi
 
 # 5. Build and run Docker containers
 echo "🔨 Building and starting Docker containers (PostgreSQL, Redis, Backend, Frontend)..."
+mkdir -p data logs
 sudo docker compose up --build -d
 
 echo ""

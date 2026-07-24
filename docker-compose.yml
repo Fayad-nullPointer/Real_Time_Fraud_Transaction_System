@@ -72,7 +72,7 @@ services:
       OPEN_ROUTER_API_KEY: ${OPEN_ROUTER_API_KEY:-}
     volumes:
       - ./models:/app/models:ro      # Mount pre-trained model artifacts (read-only)
-      - ./data:/app/data:ro          # Mount dataset files
+      - ./data:/app/data             # Mount dataset files
       - ./logs:/app/logs             # Persist fraud event logs
     ports:
       - "8005:8000"

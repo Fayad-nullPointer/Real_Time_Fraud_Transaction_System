@@ -22,9 +22,8 @@ COPY backend/ ./backend/
 COPY models/ ./models/
 COPY scripts/ ./scripts/
 COPY utils/ ./utils/
-COPY data/ ./data/
 
-RUN mkdir -p /app/logs
+RUN mkdir -p /app/data /app/logs
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
