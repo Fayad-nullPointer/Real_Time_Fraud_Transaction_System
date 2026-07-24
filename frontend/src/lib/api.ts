@@ -328,6 +328,7 @@ export const authApi = {
 
   me: () => apiFetch<CustomerMe>("/api/auth/me", {}, true),
   myState: () => apiFetch<CustomerMlState>("/api/auth/me/state", {}, true),
+  deleteAccount: () => apiFetch<{ status: string; message: string }>("/api/auth/me", { method: "DELETE" }, true),
   updateLocation: (lat: number, lon: number) =>
     apiFetch<{ status: string; location: string }>("/api/auth/location", {
       method: "POST",

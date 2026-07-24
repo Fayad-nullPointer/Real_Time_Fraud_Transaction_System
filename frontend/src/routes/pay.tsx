@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { resolveUserLocation } from "@/lib/geo";
 import { GoogleTerminalMap } from "@/components/GoogleTerminalMap";
+import { Navbar } from "@/components/Navbar";
 
 export const Route = createFileRoute("/pay")({
   component: PayPage,
@@ -295,29 +296,8 @@ function PayPage() {
   };
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-white/5 bg-[color:var(--background)]/70 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-          <Link to="/" className="flex items-center gap-2.5">
-            <img src="/vanguard-logo.png" alt="VanGuard Shield" className="h-7 w-auto object-contain" />
-            <span className="font-semibold">VanGuard Shield</span>
-            <span className="ml-1 text-xs text-muted-foreground">Customer Portal</span>
-          </Link>
-          <div className="flex items-center gap-2">
-            <Link to="/profile" className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm hover:bg-white/10">
-              <CreditCard className="h-3.5 w-3.5" /> Profile
-            </Link>
-            <button
-              type="button"
-              onClick={logout}
-              className="relative z-50 cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm hover:bg-white/10 transition-colors"
-            >
-              <LogOut className="h-3.5 w-3.5 text-rose-400" />
-              <span>Sign out</span>
-            </button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-[color:var(--background)] text-foreground">
+      <Navbar />
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {/* Dynamic Account strip */}

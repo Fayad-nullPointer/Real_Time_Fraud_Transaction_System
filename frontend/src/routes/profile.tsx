@@ -5,13 +5,14 @@ import { toast } from "sonner";
 import {
   ShieldCheck, CreditCard, MapPin, Phone, Mail, Calendar, LogOut,
   Copy, Edit3, Save, X, TrendingUp, AlertTriangle, CheckCircle2,
-  Lock, Bell, Smartphone, Globe, ChevronLeft, Activity, DollarSign, Cpu, Sparkles,
+  Lock, Bell, Smartphone, Globe, ChevronLeft, Activity, DollarSign, Cpu, Sparkles, Trash2,
 } from "lucide-react";
 import {
   txApi, authApi, getCustomer, clearCustomerToken, clearCustomer,
   type TxHistoryItem, type CustomerMlState,
 } from "@/lib/api";
 import { FeatureProfileViewer } from "@/components/FeatureProfileViewer";
+import { Navbar } from "@/components/Navbar";
 
 export const Route = createFileRoute("/profile")({
   head: () => ({
@@ -95,6 +96,8 @@ function ProfilePage() {
   const [txHistory, setTxHistory] = useState<TxHistoryItem[]>([]);
   const [mlState, setMlState] = useState<CustomerMlState | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "ml_profile">("overview");
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const p = buildProfileFromCustomer();
@@ -164,6 +167,23 @@ function ProfilePage() {
     navigate({ to: "/login" });
   };
 
+  const handleDeleteAccount = async () => {
+    setDeleting(true);
+    try {
+      await authApi.deleteAccount();
+      clearCustomerToken();
+      try {
+        localStorage.removeItem("sentinel:cardNumber");
+        localStorage.removeItem("sentinel:profile");
+      } catch {}
+      toast.success("Account permanently removed");
+      navigate({ to: "/register" });
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete account");
+      setDeleting(false);
+    }
+  };
+
   const copyCard = () => {
     navigator.clipboard.writeText(profile.cardNumber);
     toast.success("Card number copied");
@@ -175,29 +195,8 @@ function ProfilePage() {
   if (!mounted) return <div className="min-h-screen" />;
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-white/5 bg-[color:var(--background)]/70 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-          <Link to="/" className="flex items-center gap-2.5">
-            <img src="/vanguard-logo.png" alt="VanGuard Shield" className="h-7 w-auto object-contain" />
-            <span className="font-semibold">VanGuard Shield</span>
-            <span className="ml-1 text-xs text-muted-foreground">Customer Portal</span>
-          </Link>
-          <div className="flex items-center gap-2">
-            <Link to="/pay" className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm hover:bg-white/10">
-              <ChevronLeft className="h-3.5 w-3.5" /> Back to portal
-            </Link>
-            <button
-              type="button"
-              onClick={logout}
-              className="relative z-50 cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm hover:bg-white/10 transition-colors"
-            >
-              <LogOut className="h-3.5 w-3.5 text-rose-400" />
-              <span>Sign out</span>
-            </button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-[color:var(--background)] text-foreground">
+      <Navbar />
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {/* Header Title */}
@@ -276,6 +275,18 @@ function ProfilePage() {
                   <span className="text-foreground">{profile.city}, {profile.country}</span>
                 </div>
               </div>
+
+              {/* Account Actions / Delete Account */}
+              <div className="mt-6 border-t border-white/10 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteModal(true)}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete / Remove Account</span>
+                </button>
+              </div>
             </section>
 
             {/* Main content: Transactions & Details */}
@@ -341,6 +352,49 @@ function ProfilePage() {
           </div>
         )}
       </main>
+
+      {/* Delete Account Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            onClick={() => setShowDeleteModal(false)}
+          />
+          <div className="relative z-10 w-full max-w-md overflow-hidden rounded-3xl border border-rose-500/30 bg-slate-950/90 p-6 shadow-2xl backdrop-blur-2xl">
+            <div className="flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-2xl bg-rose-500/20 text-rose-400">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-white">Permanently Delete Account?</h3>
+                <p className="text-xs text-muted-foreground">This action cannot be undone.</p>
+              </div>
+            </div>
+
+            <p className="mt-4 text-xs text-muted-foreground leading-relaxed">
+              Deleting your account will remove your card customer profile (<strong className="text-white">{profile.cardNumber}</strong>) and erase all associated transaction activity history from PostgreSQL.
+            </p>
+
+            <div className="mt-6 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal(false)}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-white/10 hover:text-white transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteAccount}
+                disabled={deleting}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-lg hover:bg-rose-500 disabled:opacity-50 transition"
+              >
+                {deleting ? "Deleting..." : "Yes, Delete Account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -273,4 +273,14 @@ async def get_my_ml_state(customer_id: int = Depends(get_current_customer)):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.delete("/me")
+async def delete_my_account(customer_id: int = Depends(get_current_customer)):
+    """Delete current logged-in customer account and all associated transactions."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM transactions WHERE customer_id = $1", customer_id)
+        await conn.execute("DELETE FROM customers WHERE customer_id = $1", customer_id)
+    return {"status": "DELETED", "message": "Account successfully removed."}
+
+
 
