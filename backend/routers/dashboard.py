@@ -315,9 +315,9 @@ async def generate_llm_report(transaction_id: str, _: dict = Depends(get_current
 
     tx_datetime_str = str(tx.get("tx_datetime", "Unknown"))
 
-    user_prompt = f"""Analyze the following transaction and write a professional incident report:
+    user_prompt = f"""Analyze the following transaction and write a professional explanation or report:
 
-**Transaction Details:**
+Transaction Details:
 - Transaction ID: {tx['transaction_id']}
 - Customer ID: {tx['customer_id']}
 - Terminal ID: {tx['terminal_id']}
@@ -329,21 +329,26 @@ async def generate_llm_report(transaction_id: str, _: dict = Depends(get_current
 - Current Status: {tx.get('status', 'UNKNOWN')}
 - Top Flagging Reason: {tx.get('top_reason') or 'N/A'}
 
-**SHAP Feature Contributions (why the model flagged this):**
+SHAP Feature Contributions:
 {shap_summary}
 
-Please write a concise but thorough incident report covering:
-1. Executive Summary (2-3 sentences)
-2. Risk Assessment (severity level and confidence)
-3. Key Contributing Factors (based on SHAP values)
+Please write a concise but thorough report covering:
+1. Executive Summary (2-3 sentences explaining if the transaction is indeed suspicious or confirmed safe)
+2. Risk/Safety Assessment (severity level and confidence)
+3. Key Contributing Factors (based on SHAP values. Note: Positive values increase risk, negative values indicate normal/safe behavior)
 4. Recommended Actions
 5. Conclusion"""
 
     system_prompt = """You are a Senior Financial Fraud Analyst at a major bank's fraud investigation unit.
-You write clear, professional incident reports for flagged transactions.
-Your reports are read by compliance officers and security teams.
-Use markdown formatting for structure. Be precise and data-driven.
-Do not speculate beyond what the data shows. Reference specific SHAP values when explaining contributing factors."""
+You write clear, professional incident reports or legitimacy clearance notes.
+
+IMPORTANT: Understand that:
+- Positive SHAP values indicate features that increase the likelihood of fraud (Risk factors).
+- Negative SHAP values indicate features that decrease the likelihood of fraud (Legitimate/Safe indicators).
+
+Do not call a legitimate transaction 'Suspicious' or assign a 'Medium/High' severity to a transaction with low fraud probability (e.g. < 5.0%). For low-probability transactions, write a 'Legitimacy Clearance Note' instead of an 'Incident Report' and explain why it is safe, referencing negative SHAP values as safety drivers.
+
+Use markdown formatting. Be precise and data-driven."""
 
     # ── Call OpenRouter API with Fallback Models ────────────────────────
     # Try active free models on OpenRouter, falling back to paid slug if needed
