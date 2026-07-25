@@ -7,6 +7,7 @@ export function KafkaStreamControl() {
   const [isRunning, setIsRunning] = useState(false);
   const [speed, setSpeed] = useState(0.8);
   const [maxTx, setMaxTx] = useState(100);
+  const [dataset, setDataset] = useState("test_transactions_first_200.csv");
   const [stats, setStats] = useState({
     processed: 0,
     approved: 0,
@@ -19,6 +20,7 @@ export function KafkaStreamControl() {
     try {
       const res = await streamApi.status();
       setIsRunning(res.is_running);
+      if (res.dataset) setDataset(res.dataset);
       setStats({
         processed: res.processed,
         approved: res.approved,
@@ -37,7 +39,7 @@ export function KafkaStreamControl() {
   const handleStart = async () => {
     setLoading(true);
     try {
-      const res = await streamApi.start(speed, maxTx);
+      const res = await streamApi.start(speed, maxTx, dataset);
       setIsRunning(true);
       toast.success(res.message ?? "Kafka stream started!");
       fetchStatus();
@@ -125,7 +127,21 @@ export function KafkaStreamControl() {
       </div>
 
       {/* Controls & Metrics Grid */}
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+        {/* Source Dataset Option */}
+        <div className="rounded-xl border border-white/5 bg-black/30 p-3">
+          <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Source Dataset</label>
+          <select
+            value={dataset}
+            onChange={(e) => setDataset(e.target.value)}
+            disabled={isRunning}
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-cyan-300 font-medium outline-none focus:border-cyan-400"
+          >
+            <option value="test_transactions_first_200.csv">Uploaded Test File (200 rows)</option>
+            <option value="synthetic_fraud_transactions.csv">Full Dataset</option>
+          </select>
+        </div>
+
         {/* Speed Option */}
         <div className="rounded-xl border border-white/5 bg-black/30 p-3">
           <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Stream Speed</label>
@@ -133,7 +149,7 @@ export function KafkaStreamControl() {
             value={speed}
             onChange={(e) => setSpeed(parseFloat(e.target.value))}
             disabled={isRunning}
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-900 px-2.5 py-1.5 text-xs text-white outline-none focus:border-cyan-400"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-white outline-none focus:border-cyan-400"
           >
             <option value={0.2}>Fast (0.2s / tx)</option>
             <option value={0.5}>Normal (0.5s / tx)</option>
@@ -149,8 +165,9 @@ export function KafkaStreamControl() {
             value={maxTx}
             onChange={(e) => setMaxTx(parseInt(e.target.value, 10))}
             disabled={isRunning}
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-900 px-2.5 py-1.5 text-xs text-white outline-none focus:border-cyan-400"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-white outline-none focus:border-cyan-400"
           >
+            <option value={10}>10 Transactions</option>
             <option value={50}>50 Transactions</option>
             <option value={100}>100 Transactions</option>
             <option value={200}>200 Transactions</option>

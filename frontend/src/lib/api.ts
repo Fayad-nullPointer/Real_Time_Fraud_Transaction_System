@@ -429,10 +429,10 @@ export const dashboardApi = {
 };
 
 export const streamApi = {
-  start: (speed = 0.8, max_tx = 100) =>
+  start: (speed = 0.8, max_tx = 100, dataset = "test_transactions_first_200.csv") =>
     apiFetch<{ status: string; message: string }>("/api/dashboard/stream/start", {
       method: "POST",
-      body: JSON.stringify({ speed, max_tx }),
+      body: JSON.stringify({ speed, max_tx, dataset }),
     }, true),
 
   stop: () =>
@@ -449,5 +449,6 @@ export const streamApi = {
       fraud_count: number;
       speed: number;
       max_tx: number;
+      dataset?: string;
     }>("/api/dashboard/stream/status", {}, true),
 };
