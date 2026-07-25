@@ -1198,67 +1198,90 @@ async def _run_gui_stream_loop(speed: float, max_tx: int, dataset: str = "test_t
             if not _kafka_gui_stream.is_running:
                 break
 
-            tx_id = f"tx_stream_{uuid.uuid4().hex[:10]}"
-            customer_id = int(row.get("CUSTOMER_ID", 100001))
-            terminal_id = int(row.get("TERMINAL_ID", 1))
-            tx_amount = float(row.get("TX_AMOUNT", 50.0))
-            tx_datetime = str(row.get("TX_DATETIME", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
+            try:
+                tx_id = f"tx_stream_{uuid.uuid4().hex[:10]}"
 
-            tx_dict = {
-                "TRANSACTION_ID": tx_id,
-                "CUSTOMER_ID": customer_id,
-                "TERMINAL_ID": terminal_id,
-                "TX_DATETIME": tx_datetime,
-                "TX_AMOUNT": tx_amount,
-                "PHONE_NUMBER": f"+2010{customer_id:08d}",
-            }
+                raw_cust = row.get("CUSTOMER_ID") if "CUSTOMER_ID" in row else row.get("customer_id", 100001)
+                try:
+                    customer_id = int(raw_cust) if not pd.isna(raw_cust) else 100001
+                except (ValueError, TypeError):
+                    customer_id = 100001
 
-            result = await loop.run_in_executor(None, score_transaction, tx_dict)
+                raw_term = row.get("TERMINAL_ID") if "TERMINAL_ID" in row else row.get("terminal_id", 1)
+                try:
+                    terminal_id = int(raw_term) if not pd.isna(raw_term) else 1
+                except (ValueError, TypeError):
+                    terminal_id = 1
 
-            is_fraud = bool(result["is_fraud"])
-            fraud_prob = float(result["fraud_probability"])
-            scenario_name = result.get("scenario_name")
-            status = "PENDING_OTP" if is_fraud else "APPROVED"
+                raw_amt = row.get("TX_AMOUNT") if "TX_AMOUNT" in row else row.get("tx_amount", 50.0)
+                try:
+                    tx_amount = float(raw_amt) if not pd.isna(raw_amt) else 50.0
+                except (ValueError, TypeError):
+                    tx_amount = 50.0
 
-            _kafka_gui_stream.processed += 1
-            if is_fraud:
-                _kafka_gui_stream.fraud_count += 1
-                _kafka_gui_stream.blocked += 1
-            else:
-                _kafka_gui_stream.approved += 1
+                raw_dt = row.get("TX_DATETIME") if "TX_DATETIME" in row else row.get("tx_datetime")
+                if pd.isna(raw_dt) or not raw_dt:
+                    tx_datetime = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    tx_datetime = str(raw_dt)
 
-            now = datetime.now(timezone.utc)
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO transactions (
-                        transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
-                        is_fraud, fraud_probability, scenario_id, scenario_name,
-                        top_reason, status, shap_explanation
-                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                    ON CONFLICT (transaction_id) DO NOTHING
-                    """,
-                    tx_id, customer_id, terminal_id, tx_amount, now,
-                    is_fraud, fraud_prob,
-                    result.get("scenario_id"), scenario_name,
-                    result.get("top_reason"), status,
-                    json.dumps(result.get("top_reasons", []))
-                )
+                tx_dict = {
+                    "TRANSACTION_ID": tx_id,
+                    "CUSTOMER_ID": customer_id,
+                    "TERMINAL_ID": terminal_id,
+                    "TX_DATETIME": tx_datetime,
+                    "TX_AMOUNT": tx_amount,
+                    "PHONE_NUMBER": f"+2010{customer_id:08d}",
+                }
 
-            await ws_manager.broadcast({
-                "event": "TRANSACTION",
-                "transaction_id": tx_id,
-                "customer_id": customer_id,
-                "terminal_id": terminal_id,
-                "amount": tx_amount,
-                "fraud_probability": fraud_prob,
-                "is_fraud": is_fraud,
-                "scenario_name": scenario_name,
-                "top_reason": result.get("top_reason"),
-                "top_reasons": result.get("top_reasons", []),
-                "status": status,
-                "timestamp": now.isoformat(),
-            })
+                result = await loop.run_in_executor(None, score_transaction, tx_dict)
+
+                is_fraud = bool(result["is_fraud"])
+                fraud_prob = float(result["fraud_probability"])
+                scenario_name = result.get("scenario_name")
+                status = "PENDING_OTP" if is_fraud else "APPROVED"
+
+                _kafka_gui_stream.processed += 1
+                if is_fraud:
+                    _kafka_gui_stream.fraud_count += 1
+                    _kafka_gui_stream.blocked += 1
+                else:
+                    _kafka_gui_stream.approved += 1
+
+                now = datetime.now(timezone.utc)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO transactions (
+                            transaction_id, customer_id, terminal_id, tx_amount, tx_datetime,
+                            is_fraud, fraud_probability, scenario_id, scenario_name,
+                            top_reason, status, shap_explanation
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                        ON CONFLICT (transaction_id) DO NOTHING
+                        """,
+                        tx_id, customer_id, terminal_id, tx_amount, now,
+                        is_fraud, fraud_prob,
+                        result.get("scenario_id"), scenario_name,
+                        result.get("top_reason"), status,
+                        json.dumps(result.get("top_reasons", []))
+                    )
+
+                await ws_manager.broadcast({
+                    "event": "TRANSACTION",
+                    "transaction_id": tx_id,
+                    "customer_id": customer_id,
+                    "terminal_id": terminal_id,
+                    "amount": tx_amount,
+                    "fraud_probability": fraud_prob,
+                    "is_fraud": is_fraud,
+                    "scenario_name": scenario_name,
+                    "top_reason": result.get("top_reason"),
+                    "top_reasons": result.get("top_reasons", []),
+                    "status": status,
+                    "timestamp": now.isoformat(),
+                })
+            except Exception as row_exc:
+                print(f"[gui-stream] Error processing stream row: {row_exc}")
 
             await asyncio.sleep(speed)
 
