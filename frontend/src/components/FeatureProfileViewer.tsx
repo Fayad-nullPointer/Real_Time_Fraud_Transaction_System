@@ -99,6 +99,14 @@ export const FEATURE_EXPLANATIONS: Record<string, { label: string; description: 
     label: "OTP Verification Timed Out",
     description: "Customer failed to submit the valid 2FA verification code before expiry, causing the transaction to be auto-declined.",
   },
+  RULE_compromised_terminal: {
+    label: "Terminal Blacklisted (Skimming)",
+    description: "This merchant terminal was flagged as compromised based on fraud reports from other banking customers.",
+  },
+  TERMINAL_COMPROMISED_OTP_FAILED: {
+    label: "Blocked: Compromised Terminal & OTP Unverified",
+    description: "The transaction was executed at a blacklisted terminal and the cardholder failed to verify their identity via OTP.",
+  },
 };
 
 export function formatFeatureKey(key: string): string {

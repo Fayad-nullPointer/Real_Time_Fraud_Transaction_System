@@ -264,11 +264,40 @@ async def verify_transaction(
 
     new_status = "VERIFIED" if otp_valid else "DECLINED"
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE transactions SET status = $1 WHERE transaction_id = $2",
-            new_status, body.transaction_id,
-        )
+    if not otp_valid:
+        async with pool.acquire() as conn:
+            tx_detail = await conn.fetchrow(
+                "SELECT shap_explanation FROM transactions WHERE transaction_id = $1",
+                body.transaction_id
+            )
+        existing_reasons = _parse_shap_reasons(tx_detail["shap_explanation"]) if tx_detail else []
+        is_compromised = any(r.get("feature") == "RULE_compromised_terminal" for r in existing_reasons)
+        
+        if is_compromised:
+            otp_reason = {"feature": "TERMINAL_COMPROMISED_OTP_FAILED", "shap_value": 1.0, "type": "rule"}
+            top_reason_val = "TERMINAL_COMPROMISED_OTP_FAILED"
+        else:
+            otp_reason = {"feature": "OTP_NOT_ENTERED", "shap_value": None, "type": "otp"}
+            top_reason_val = "OTP_NOT_ENTERED"
+            
+        updated_reasons = [otp_reason] + existing_reasons
+        
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE transactions
+                SET status = 'DECLINED', is_fraud = TRUE,
+                    top_reason = $1, shap_explanation = $2
+                WHERE transaction_id = $3
+                """,
+                top_reason_val, json.dumps(updated_reasons), body.transaction_id
+            )
+    else:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE transactions SET status = $1 WHERE transaction_id = $2",
+                new_status, body.transaction_id,
+            )
 
     # Update CSV label
     is_fraud = not otp_valid
@@ -583,7 +612,15 @@ async def decline_transaction(
     # (rather than replacing them) so both the model's original evidence
     # and the customer's failure to verify are visible together.
     existing_reasons = _parse_shap_reasons(tx["shap_explanation"])
-    otp_reason = {"feature": "OTP_NOT_ENTERED", "shap_value": None, "type": "otp"}
+    is_compromised = any(r.get("feature") == "RULE_compromised_terminal" for r in existing_reasons)
+    
+    if is_compromised:
+        otp_reason = {"feature": "TERMINAL_COMPROMISED_OTP_FAILED", "shap_value": 1.0, "type": "rule"}
+        top_reason_val = "TERMINAL_COMPROMISED_OTP_FAILED"
+    else:
+        otp_reason = {"feature": "OTP_NOT_ENTERED", "shap_value": None, "type": "otp"}
+        top_reason_val = "OTP_NOT_ENTERED"
+
     updated_reasons = [otp_reason] + existing_reasons
 
     async with pool.acquire() as conn:
@@ -591,10 +628,10 @@ async def decline_transaction(
             """
             UPDATE transactions
             SET status = 'DECLINED', is_fraud = TRUE,
-                top_reason = 'OTP_NOT_ENTERED', shap_explanation = $2
+                top_reason = $2, shap_explanation = $3
             WHERE transaction_id = $1
             """,
-            body.transaction_id, json.dumps(updated_reasons),
+            body.transaction_id, top_reason_val, json.dumps(updated_reasons),
         )
 
     # Update CSV label

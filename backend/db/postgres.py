@@ -23,6 +23,8 @@ _sqlite_path = Path(__file__).resolve().parents[2] / "data" / "fallback_fraud.db
 class SQLiteRow(dict):
     """Replicates the Row indexing and type handling of asyncpg."""
     def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
         if isinstance(key, str):
             for k in list(self.keys()):
                 if k.lower() == key.lower():
@@ -60,13 +62,25 @@ class SQLiteConnection:
         q = _pg_to_sqlite_query(query)
         def _fetch():
             cursor = self.conn.cursor()
-            cursor.execute(q, args)
-            return [SQLiteRow(r) for r in cursor.fetchall()]
+            is_write = any(q.strip().upper().startswith(prefix) for prefix in ("INSERT", "UPDATE", "DELETE", "REPLACE"))
+            if is_write:
+                with self.conn:
+                    cursor.execute(q, args)
+                    return [SQLiteRow(r) for r in cursor.fetchall()]
+            else:
+                cursor.execute(q, args)
+                return [SQLiteRow(r) for r in cursor.fetchall()]
         return await asyncio.to_thread(_fetch)
 
     async def fetchrow(self, query: str, *args) -> SQLiteRow | None:
         rows = await self.fetch(query, *args)
         return rows[0] if rows else None
+
+    async def fetchval(self, query: str, *args):
+        row = await self.fetchrow(query, *args)
+        if row:
+            return list(row.values())[0]
+        return None
 
 
 class SQLitePool:
@@ -101,6 +115,29 @@ def _pg_to_sqlite_query(sql: str) -> str:
     )
     # Convert NOW() to datetime('now')
     sql = re.sub(r'\bNOW\(\)', "datetime('now')", sql, flags=re.IGNORECASE)
+    # Convert EXTRACT(HOUR FROM column) to SQLite strftime
+    sql = re.sub(
+        r"EXTRACT\(\s*HOUR\s*FROM\s*([\w.]+)\)",
+        r"cast(strftime('%H', \1) as integer)",
+        sql,
+        flags=re.IGNORECASE
+    )
+    # Convert EXTRACT(DOW FROM column) to SQLite strftime
+    sql = re.sub(
+        r"EXTRACT\(\s*DOW\s*FROM\s*([\w.]+)\)",
+        r"cast(strftime('%w', \1) as integer)",
+        sql,
+        flags=re.IGNORECASE
+    )
+    # Convert COUNT(*) FILTER (WHERE condition) to SUM(CASE WHEN condition THEN 1 ELSE 0 END)
+    sql = re.sub(
+        r"COUNT\(\*\)\s*FILTER\s*\(WHERE\s+(.*?)\)",
+        r"SUM(CASE WHEN \1 THEN 1 ELSE 0 END)",
+        sql,
+        flags=re.IGNORECASE
+    )
+    # Strip type castings like ::int, ::numeric, etc.
+    sql = re.sub(r"::\w+", "", sql)
     # Convert $1, $2 parameters to ?
     sql = re.sub(r'\$\d+', '?', sql)
     # Convert ILIKE to case-insensitive LIKE
@@ -179,7 +216,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     status TEXT NOT NULL DEFAULT 'PENDING',
     shap_explanation TEXT,
     otp_expires_at TEXT,
-    llm_report TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -193,20 +229,12 @@ async def apply_schema() -> None:
             for stmt in SQLITE_SCHEMA.split(";"):
                 if stmt.strip():
                     await conn.execute(stmt)
-            # Migrate: add llm_report column if it doesn't exist yet
-            try:
-                await conn.execute("ALTER TABLE transactions ADD COLUMN llm_report TEXT")
-            except Exception:
-                pass  # column already exists
         print("[sqlite] SQLite schema applied successfully.")
     else:
         schema_path = Path(__file__).parent / "schema.sql"
         sql = schema_path.read_text(encoding="utf-8")
         async with pool.acquire() as conn:
-            try:
-                await conn.execute(sql)
-            except Exception as e:
-                print(f"[postgres] Note on schema initialization: {e}")
+            await conn.execute(sql)
         print("[postgres] PostgreSQL schema applied successfully.")
 
     # Seed default admin user (ID 100000, password '1234') if database has no customers
@@ -226,13 +254,3 @@ async def apply_schema() -> None:
                 print("[postgres/sqlite] Seeded default admin user: ID=100000, Password=1234")
         except Exception as e:
             print(f"[postgres/sqlite] Warning: Failed to seed default admin: {e}")
-
-    # Ensure PostgreSQL sequence starts after the highest customer_id (e.g. 100001+)
-    if not _use_sqlite:
-        async with pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    "SELECT setval('customers_customer_id_seq', (SELECT GREATEST(COALESCE(MAX(customer_id), 100000), 100000) FROM customers))"
-                )
-            except Exception as e:
-                print(f"[postgres] Note on sequence sync: {e}")

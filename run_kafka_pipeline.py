@@ -114,17 +114,7 @@ def print_metrics_panel(title: str = "LIVE STREAM METRICS DASHBOARD"):
 # ---------------------------------------------------------------------- #
 # PRODUCER THREAD
 # ---------------------------------------------------------------------- #
-def get_dataset_csv_path() -> Path:
-    p1 = DATA_DIR / "synthetic_fraud_transactions.csv"
-    if p1.exists():
-        return p1
-    p2 = PROJECT_ROOT / "full dataset with brief" / "synthetic_fraud_transactions.csv"
-    if p2.exists():
-        return p2
-    return p1
-
 def run_producer(topic: str, csv_path: Path, speed: float, max_tx: Optional[int] = None):
-    csv_path = get_dataset_csv_path()
     logger.info(f"[bold green]Starting Producer Thread... Reading dataset from {csv_path}[/bold green]")
     
     try:
@@ -267,7 +257,7 @@ def run_consumer(topic: str, dlq_topic: str, explain: bool, interactive: bool, m
     # Warm start feature engineer using historical training data (Day < 140) to seed state
     logger.info("Seeding consumer feature-engineering state (Warm Start) from historical data...")
     try:
-        df_hist = pd.read_csv(get_dataset_csv_path())
+        df_hist = pd.read_csv(DATA_DIR / "synthetic_fraud_transactions.csv")
         df_hist["TX_DATETIME"] = pd.to_datetime(df_hist["TX_DATETIME"])
         t0 = df_hist["TX_DATETIME"].min().normalize()
         df_hist["TX_DAY"] = (df_hist["TX_DATETIME"] - t0).dt.days
@@ -338,7 +328,7 @@ def run_consumer(topic: str, dlq_topic: str, explain: bool, interactive: bool, m
                 "tx_amount": float(tx.get("TX_AMOUNT")),
                 "tx_datetime": str(tx.get("TX_DATETIME")),
             }
-            requests.post("http://localhost:8008/api/transactions/simulate", json=payload, timeout=1.0)
+            requests.post("http://localhost:8005/api/transactions/simulate", json=payload, timeout=1.0)
         except Exception:
             pass
 

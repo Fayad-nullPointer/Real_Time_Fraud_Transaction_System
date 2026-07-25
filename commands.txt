@@ -1,0 +1,25 @@
+#  Terminal 1: Run the FastAPI Backend Server 
+#  This runs the Python API backend & connects to your local PostgreSQL and applies schemas
+
+
+cd "C:\Users\WellCome\Desktop\Graduation Project\Final_Architecture\Real_Time_Fraud_Transaction_System"
+uv run uvicorn backend.main:app --reload --port 8005
+
+////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+# Terminal 2 : Run the React Frontend Server
+# This starts the local web server to display the user interface
+
+cd "C:\Users\WellCome\Desktop\Graduation Project\Final_Architecture\Real_Time_Fraud_Transaction_System\frontend"
+npm run dev
+Open your browser to: http://localhost:8080/
+
+////////////////////////////////////////////////////////////////////////////////////////
+
+# Terminal 3: Run the Kafka Stream Simulation
+# This starts the event-streaming pipeline simulating live transactions and sending fraud alerts to your phone
+
+cd "C:\Users\WellCome\Desktop\Graduation Project\Final_Architecture\Real_Time_Fraud_Transaction_System"
+uv run python run_kafka_pipeline.py --speed 0.8 --max-tx 100 --interactive

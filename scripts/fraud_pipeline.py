@@ -84,6 +84,33 @@ class FraudDetectionPipeline:
         self._pending_otps: Dict[object, str] = {}
         # List of compromised terminals (Rule Engine Gate)
         self.compromised_terminals = set()
+        self._load_compromised_terminals()
+
+    def _load_compromised_terminals(self):
+        import json
+        from pathlib import Path
+        path = Path("data/compromised_terminals.json")
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    ids = json.load(f)
+                    self.compromised_terminals = set(int(x) for x in ids)
+                logger.info(f"Loaded {len(self.compromised_terminals)} compromised terminals from persistent store.")
+            except Exception as e:
+                logger.error(f"Failed to load compromised terminals: {e}")
+        else:
+            self.compromised_terminals = set()
+
+    def _save_compromised_terminals(self):
+        import json
+        from pathlib import Path
+        path = Path("data/compromised_terminals.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(list(self.compromised_terminals), f)
+        except Exception as e:
+            logger.error(f"Failed to save compromised terminals: {e}")
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -131,6 +158,7 @@ class FraudDetectionPipeline:
     def compromise_terminal(self, terminal_id: int):
         """Dynamically flag a terminal ID as compromised/blacklisted"""
         self.compromised_terminals.add(terminal_id)
+        self._save_compromised_terminals()
         logger.warning(f"[bold red][RULE ENGINE] Terminal {terminal_id} flagged as COMPROMISED.[/bold red]")
 
     # ------------------------------------------------------------------ #

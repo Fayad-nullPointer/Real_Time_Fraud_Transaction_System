@@ -66,6 +66,8 @@ function mapShapContributions(
       NIGHT_TX: "Night Transaction",
       CUSTOMER_VELOCITY: "Customer velocity (24h)",
       OTP_NOT_ENTERED: "OTP Verification Required",
+      RULE_compromised_terminal: "Terminal Blacklisted (Skimming)",
+      TERMINAL_COMPROMISED_OTP_FAILED: "Blocked: Compromised Terminal & OTP Unverified",
     };
 
     return topReasons.map((r) => {
