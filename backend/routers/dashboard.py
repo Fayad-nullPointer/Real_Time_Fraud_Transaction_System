@@ -1248,8 +1248,25 @@ async def _run_gui_stream_loop(speed: float, max_tx: int, dataset: str = "test_t
                 else:
                     _kafka_gui_stream.approved += 1
 
+                # Seed customer and terminal if missing to avoid FK constraint failures
                 now = datetime.now(timezone.utc)
                 async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO customers (customer_id, phone_number, password_hash, full_name, role)
+                        VALUES ($1, $2, $3, $4, 'user')
+                        ON CONFLICT (customer_id) DO NOTHING
+                        """,
+                        customer_id, f"+2010{customer_id:08d}", "mock_hash", f"Customer {customer_id}"
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO terminals (terminal_id, terminal_name, latitude, longitude)
+                        VALUES ($1, $2, 30.0, 31.0)
+                        ON CONFLICT (terminal_id) DO NOTHING
+                        """,
+                        terminal_id, f"Terminal {terminal_id}"
+                    )
                     await conn.execute(
                         """
                         INSERT INTO transactions (
@@ -1265,6 +1282,32 @@ async def _run_gui_stream_loop(speed: float, max_tx: int, dataset: str = "test_t
                         result.get("top_reason"), status,
                         json.dumps(result.get("top_reasons", []))
                     )
+
+                # Emit structured log to logs/fraud_events.log for live log stream UI
+                try:
+                    from logger import get_logger
+                    gui_logger = get_logger("kafka_stream_gui")
+                    log_extra = {
+                        "event_type": "KAFKA_STREAM_TRANSACTION",
+                        "transaction_id": tx_id,
+                        "customer_id": customer_id,
+                        "terminal_id": terminal_id,
+                        "fraud_probability": fraud_prob,
+                        "scenario": scenario_name,
+                        "status": status,
+                    }
+                    if is_fraud:
+                        gui_logger.warning(
+                            f"[ALERT] Kafka Stream Flagged Fraud | TX: {tx_id} | Cust: {customer_id} | Amount: ${tx_amount:.2f} | Prob: {fraud_prob:.4f} | Scenario: {scenario_name or 'None'}",
+                            extra={**log_extra, "level": "WARNING"}
+                        )
+                    else:
+                        gui_logger.info(
+                            f"[OK] Kafka Stream Approved Tx | TX: {tx_id} | Cust: {customer_id} | Amount: ${tx_amount:.2f} | Prob: {fraud_prob:.4f}",
+                            extra={**log_extra, "level": "INFO"}
+                        )
+                except Exception as log_exc:
+                    print(f"[gui-stream] Note logging stream event: {log_exc}")
 
                 await ws_manager.broadcast({
                     "event": "TRANSACTION",
