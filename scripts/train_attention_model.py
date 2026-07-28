@@ -373,23 +373,20 @@ def main():
     fe = FraudFeatureEngineer().fit(customer_df, terminal_df, tx_df)
     train_df, holdout_df, oot_df = fe.build_training_frames(tx_df)
 
-    # Fallback safety split if custom sampling resulted in empty time windows
-    if len(train_df) == 0 or len(holdout_df) == 0:
-        print("⚠️ Adjusting time splits to ensure non-empty train/holdout/oot sets...")
-        n_total = len(tx_df)
+    # Dynamic fallback if dataset time span is shorter than 162 days (ensures non-empty holdout & oot)
+    if len(holdout_df) == 0 or len(oot_df) == 0:
+        print("⚠️ Notice: Dataset time span is under 162 days. Creating dynamic 70% train / 15% holdout / 15% OOT temporal splits...")
+        full_df = pd.concat([train_df, holdout_df, oot_df], ignore_index=True).sort_values("TX_DATETIME").reset_index(drop=True)
+        n_total = len(full_df)
         train_end = int(n_total * 0.70)
         holdout_end = int(n_total * 0.85)
 
-        train_df = tx_df.iloc[:train_end].copy()
-        holdout_df = tx_df.iloc[train_end:holdout_end].copy()
-        oot_df = tx_df.iloc[holdout_end:].copy()
-
-        # Re-transform features if raw tx_df was used
-        if "Z_score" not in train_df.columns:
-            _, holdout_df, oot_df = fe.build_training_frames(tx_df)
-            train_df = fe.build_training_frames(tx_df)[0]
+        train_df = full_df.iloc[:train_end].copy()
+        holdout_df = full_df.iloc[train_end:holdout_end].copy()
+        oot_df = full_df.iloc[holdout_end:].copy()
 
     print(f"Dataset split counts: train={len(train_df):,}, holdout={len(holdout_df):,}, oot={len(oot_df):,}")
+
 
 
     train_attention_model(
