@@ -254,10 +254,11 @@ def train_attention_model(
             holdout_probs = torch.sigmoid(holdout_logits).cpu().numpy()
 
         val_metrics = compute_metrics(y_holdout, holdout_probs)
+        pr_auc_str = f"{val_metrics['pr_auc']:.4f}" if val_metrics['pr_auc'] is not None else "N/A"
         print(
             f"Epoch {epoch:02d}/{epochs:02d} | Train Loss: {avg_loss:.4f} | "
             f"Holdout Macro F1: {val_metrics['macro_f1']:.4f} | "
-            f"PR-AUC: {val_metrics['pr_auc']:.4f} | "
+            f"PR-AUC: {pr_auc_str} | "
             f"Top-100 Precision@k: {val_metrics['precision_at_k']['top_100']:.4f}"
         )
 
@@ -274,13 +275,16 @@ def train_attention_model(
     holdout_res = compute_metrics(y_holdout, holdout_probs)
     oot_res = compute_metrics(y_oot, oot_probs)
 
+    def _fmt(val):
+        return f"{val:.4f}" if val is not None else "N/A (single class)"
+
     print("\n📊 HOLDOUT SPLIT METRICS:")
     print(f"  • Macro F1-Score : {holdout_res['macro_f1']:.4f}")
     print(f"  • Fraud F1-Score : {holdout_res['fraud_f1']:.4f}")
     print(f"  • Fraud Precision: {holdout_res['fraud_precision']:.4f}")
     print(f"  • Fraud Recall   : {holdout_res['fraud_recall']:.4f}")
-    print(f"  • ROC-AUC        : {holdout_res['roc_auc']:.4f}")
-    print(f"  • PR-AUC         : {holdout_res['pr_auc']:.4f}")
+    print(f"  • ROC-AUC        : {_fmt(holdout_res['roc_auc'])}")
+    print(f"  • PR-AUC         : {_fmt(holdout_res['pr_auc'])}")
     print("  • Precision@k    :", holdout_res["precision_at_k"])
     print("  • Recall@k       :", holdout_res["recall_at_k"])
 
@@ -289,8 +293,8 @@ def train_attention_model(
     print(f"  • Fraud F1-Score : {oot_res['fraud_f1']:.4f}")
     print(f"  • Fraud Precision: {oot_res['fraud_precision']:.4f}")
     print(f"  • Fraud Recall   : {oot_res['fraud_recall']:.4f}")
-    print(f"  • ROC-AUC        : {oot_res['roc_auc']:.4f}")
-    print(f"  • PR-AUC         : {oot_res['pr_auc']:.4f}")
+    print(f"  • ROC-AUC        : {_fmt(oot_res['roc_auc'])}")
+    print(f"  • PR-AUC         : {_fmt(oot_res['pr_auc'])}")
     print("  • Precision@k    :", oot_res["precision_at_k"])
     print("  • Recall@k       :", oot_res["recall_at_k"])
 
