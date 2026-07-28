@@ -306,6 +306,38 @@ def train_attention_model(
     print(f"✅ Metrics saved to: {metrics_path}")
 
 
+def find_dataset_dir(user_dir: Path) -> Path:
+    candidates = [
+        user_dir,
+        PROJECT_ROOT / "data",
+        PROJECT_ROOT / "full dataset with brief",
+    ]
+    for c in candidates:
+        if (c / "customer_profiles.csv").exists():
+            return c
+
+    zip_path = PROJECT_ROOT / "full dataset with brief.zip"
+    if zip_path.exists():
+        import zipfile
+        target_dir = PROJECT_ROOT / "data"
+        print(f"📦 Extracting dataset from {zip_path} into {target_dir}...")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(target_dir)
+        if (target_dir / "customer_profiles.csv").exists():
+            return target_dir
+
+    print("\n" + "❌ " * 20)
+    print("DATASET NOT FOUND ON THIS MACHINE!")
+    print("Checked locations:")
+    for c in candidates:
+        print(f"  - {c / 'customer_profiles.csv'}")
+    print("\nTo fix on AWS, transfer the dataset from your local machine using SCP:")
+    print("  scp -i /path/to/key.pem -r \"full dataset with brief/\"* ubuntu@<AWS_PUBLIC_IP>:~/Real_Time_Fraud_Transaction_System/data/")
+    print("❌ " * 20 + "\n")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train PyTorch Tabular Attention Fraud Model")
     parser.add_argument("--data-dir", type=str, default=str(PROJECT_ROOT / "data"))
@@ -313,13 +345,14 @@ def main():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--max-rows", type=int, default=None, help="Max transactions to load (for low-RAM EC2 instances)")
 
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
+    data_dir = find_dataset_dir(Path(args.data_dir))
     out_dir = Path(args.out_dir)
 
-    print("Loading CSV datasets...")
+    print(f"Loading CSV datasets from [{data_dir}]...")
     customer_df = pd.read_csv(data_dir / "customer_profiles.csv")
     terminal_df = pd.read_csv(data_dir / "terminal_profiles.csv")
     tx_df = pd.read_csv(data_dir / "synthetic_fraud_transactions.csv")
@@ -329,6 +362,10 @@ def main():
         print(f"Appending realtime transactions from {realtime_path}...")
         realtime_df = pd.read_csv(realtime_path)
         tx_df = pd.concat([tx_df, realtime_df], ignore_index=True)
+
+    if args.max_rows and len(tx_df) > args.max_rows:
+        print(f"⚠️ Memory Saver: Sampling latest {args.max_rows:,} transactions out of {len(tx_df):,}...")
+        tx_df = tx_df.iloc[-args.max_rows:].reset_index(drop=True)
 
     tx_df["TX_DATETIME"] = pd.to_datetime(tx_df["TX_DATETIME"])
 
@@ -351,3 +388,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
