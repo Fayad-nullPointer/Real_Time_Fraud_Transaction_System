@@ -138,14 +138,23 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
 
 def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> dict:
+    # Clean NaN predictions (replace with 0.0)
+    y_prob = np.nan_to_num(y_prob, nan=0.0)
     y_pred = (y_prob >= threshold).astype(int)
 
+    n_classes = len(np.unique(y_true))
     macro_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
     fraud_p = precision_score(y_true, y_pred, zero_division=0)
     fraud_r = recall_score(y_true, y_pred, zero_division=0)
     fraud_f1 = f1_score(y_true, y_pred, pos_label=1, zero_division=0)
-    roc_auc = roc_auc_score(y_true, y_prob)
-    pr_auc = average_precision_score(y_true, y_prob)
+
+    # ROC-AUC and PR-AUC require both classes present
+    if n_classes >= 2:
+        roc_auc = roc_auc_score(y_true, y_prob)
+        pr_auc = average_precision_score(y_true, y_prob)
+    else:
+        roc_auc = None
+        pr_auc = None
 
     k_evals = [50, 100, 500, 1000, 0.01, 0.05]
     p_at_k = {}
@@ -161,8 +170,8 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
         "fraud_precision": round(float(fraud_p), 4),
         "fraud_recall": round(float(fraud_r), 4),
         "fraud_f1": round(float(fraud_f1), 4),
-        "roc_auc": round(float(roc_auc), 4),
-        "pr_auc": round(float(pr_auc), 4),
+        "roc_auc": round(float(roc_auc), 4) if roc_auc is not None else None,
+        "pr_auc": round(float(pr_auc), 4) if pr_auc is not None else None,
         "precision_at_k": p_at_k,
         "recall_at_k": r_at_k,
     }
@@ -307,25 +316,48 @@ def train_attention_model(
 
 
 def find_dataset_dir(user_dir: Path) -> Path:
+    """Find the directory containing the LARGEST synthetic_fraud_transactions.csv.
+    This prevents accidentally using a tiny sample CSV when the real dataset
+    exists in a subdirectory (e.g. from zip extraction)."""
     candidates = [
         user_dir,
         PROJECT_ROOT / "data",
         PROJECT_ROOT / "full dataset with brief",
+        # Common zip extraction subdirectories
+        PROJECT_ROOT / "data" / "full dataset with brief",
+        user_dir / "full dataset with brief",
     ]
-    for c in candidates:
-        if (c / "customer_profiles.csv").exists():
-            return c
 
+    best_dir = None
+    best_size = 0
+
+    for c in candidates:
+        tx_path = c / "synthetic_fraud_transactions.csv"
+        cust_path = c / "customer_profiles.csv"
+        if tx_path.exists() and cust_path.exists():
+            size = tx_path.stat().st_size
+            print(f"  📁 Found dataset at [{c}] — synthetic_fraud_transactions.csv = {size / 1_000_000:.1f} MB")
+            if size > best_size:
+                best_size = size
+                best_dir = c
+
+    if best_dir is not None:
+        if best_size < 100_000:
+            print(f"  ⚠️ WARNING: Largest dataset found is only {best_size:,} bytes — this is a sample, not the full dataset!")
+        return best_dir
+
+    # Try extracting from zip
     zip_path = PROJECT_ROOT / "full dataset with brief.zip"
     if zip_path.exists():
         import zipfile
-        target_dir = PROJECT_ROOT / "data"
+        target_dir = PROJECT_ROOT / "data" / "full_dataset"
         print(f"📦 Extracting dataset from {zip_path} into {target_dir}...")
         target_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(target_dir)
-        if (target_dir / "customer_profiles.csv").exists():
-            return target_dir
+        # Search recursively for the CSV after extraction
+        for match in target_dir.rglob("synthetic_fraud_transactions.csv"):
+            return match.parent
 
     print("\n" + "❌ " * 20)
     print("DATASET NOT FOUND ON THIS MACHINE!")
@@ -352,10 +384,20 @@ def main():
     data_dir = find_dataset_dir(Path(args.data_dir))
     out_dir = Path(args.out_dir)
 
-    print(f"Loading CSV datasets from [{data_dir}]...")
+    print(f"\n✅ Using dataset directory: [{data_dir}]")
     customer_df = pd.read_csv(data_dir / "customer_profiles.csv")
     terminal_df = pd.read_csv(data_dir / "terminal_profiles.csv")
     tx_df = pd.read_csv(data_dir / "synthetic_fraud_transactions.csv")
+
+    print(f"   Transactions loaded : {len(tx_df):,} rows")
+    print(f"   Customer profiles   : {len(customer_df):,} rows")
+    print(f"   Terminal profiles   : {len(terminal_df):,} rows")
+
+    if len(tx_df) < 1000:
+        print("\n⚠️  WARNING: Very small transaction dataset detected!")
+        print("   You may be reading the tiny sample CSV instead of the full 1.8M-row dataset.")
+        print("   Check that 'full dataset with brief.zip' was extracted correctly.")
+        print("   Run on AWS: ls -lh data/ data/*/  to inspect file sizes.\n")
 
     realtime_path = data_dir / "realtime_transactions.csv"
     if realtime_path.exists():
