@@ -237,3 +237,48 @@ def evaluate_model(
         "classification_report": report,
         "confusion_matrix": cm,
     }
+
+
+def precision_at_k(y_true, y_prob, k: int | float) -> float:
+    """
+    Calculates Precision@k.
+    `k` can be an integer count (e.g. 100) or a float fraction (e.g. 0.01 for top 1%).
+    """
+    y_true_arr = np.asarray(y_true)
+    y_prob_arr = np.asarray(y_prob)
+    n = len(y_true_arr)
+
+    if isinstance(k, float) and 0.0 < k <= 1.0:
+        top_k = max(1, int(n * k))
+    else:
+        top_k = min(n, int(k))
+
+    if top_k <= 0:
+        return 0.0
+
+    top_indices = np.argsort(y_prob_arr)[::-1][:top_k]
+    tp = np.sum(y_true_arr[top_indices] == 1)
+    return float(tp / top_k)
+
+
+def recall_at_k(y_true, y_prob, k: int | float) -> float:
+    """
+    Calculates Recall@k.
+    `k` can be an integer count (e.g. 100) or a float fraction (e.g. 0.01 for top 1%).
+    """
+    y_true_arr = np.asarray(y_true)
+    y_prob_arr = np.asarray(y_prob)
+    n = len(y_true_arr)
+    total_positives = np.sum(y_true_arr == 1)
+
+    if total_positives == 0:
+        return 0.0
+
+    if isinstance(k, float) and 0.0 < k <= 1.0:
+        top_k = max(1, int(n * k))
+    else:
+        top_k = min(n, int(k))
+
+    top_indices = np.argsort(y_prob_arr)[::-1][:top_k]
+    tp = np.sum(y_true_arr[top_indices] == 1)
+    return float(tp / total_positives)
