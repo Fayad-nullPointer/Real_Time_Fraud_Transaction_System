@@ -328,7 +328,8 @@ def run_consumer(topic: str, dlq_topic: str, explain: bool, interactive: bool, m
                 "tx_amount": float(tx.get("TX_AMOUNT")),
                 "tx_datetime": str(tx.get("TX_DATETIME")),
             }
-            requests.post("http://localhost:8008/api/transactions/simulate", json=payload, timeout=1.0)
+            backend_port = os.getenv("PORT", "8005")
+            requests.post(f"http://localhost:{backend_port}/api/transactions/simulate", json=payload, timeout=1.0)
         except Exception:
             pass
 
